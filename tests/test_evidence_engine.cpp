@@ -21,12 +21,29 @@ int main() {
         return EXIT_FAILURE;
     }
 
+    const auto pileup = engine.pileup(variant, filters, 2);
+    if (!pileup.has_reference || pileup.alignments.size() != 1 || pileup.reference_bases != "ACGTA") {
+        std::cerr << "Unexpected pileup data\n";
+        return EXIT_FAILURE;
+    }
+
     bamseek::RegionQuery region{"chr1:1-12", {"chr1", 0, 12}};
     const auto region_batch = engine.evaluate({region}, filters);
     if (!region_batch.errors.empty() || region_batch.results.size() != 1) return EXIT_FAILURE;
     const auto& region_evidence = std::get<bamseek::RegionEvidence>(region_batch.results.front());
     if (!region_evidence.candidates.empty()) {
         std::cerr << "Reference-matching test reads should not yield candidates\n";
+        return EXIT_FAILURE;
+    }
+    bool rejected_insecure_resource = false;
+    try {
+        bamseek::EvidenceEngine insecure({.uri = "http://example.com/sample.bam"});
+        (void)insecure;
+    } catch (const std::runtime_error&) {
+        rejected_insecure_resource = true;
+    }
+    if (!rejected_insecure_resource) {
+        std::cerr << "Insecure remote resource should have been rejected before access\n";
         return EXIT_FAILURE;
     }
     return EXIT_SUCCESS;

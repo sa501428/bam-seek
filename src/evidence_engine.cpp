@@ -18,6 +18,21 @@ constexpr std::uint16_t flag_secondary = 0x100;
 constexpr std::uint16_t flag_duplicate = 0x400;
 constexpr std::uint16_t flag_supplementary = 0x800;
 
+bool allowed_resource_uri(const std::string& uri) {
+    return uri.find("://") == std::string::npos || uri.starts_with("https://");
+}
+
+bool allowed_resource_uri(const std::optional<std::string>& uri) {
+    return !uri || allowed_resource_uri(*uri);
+}
+
+std::unique_ptr<igv::AlignmentReader> open_allowed_alignments(const igv::Resource& resource) {
+    if (!allowed_resource_uri(resource.uri) || !allowed_resource_uri(resource.index_uri) || !allowed_resource_uri(resource.reference_uri)) {
+        throw std::runtime_error("BAM Seek accepts local paths and HTTPS resources only; HTTP and other URL schemes are not permitted.");
+    }
+    return igv::open_alignments(resource);
+}
+
 struct ReadLayout {
     std::map<std::int64_t, std::pair<char, int>> bases;
     std::map<std::int64_t, std::string> insertions_after;
@@ -213,12 +228,27 @@ std::string allele_name(const Allele allele) {
     return "UNKNOWN";
 }
 
-EvidenceEngine::EvidenceEngine(igv::Resource resource) : reader_(igv::open_alignments(resource)) {
+EvidenceEngine::EvidenceEngine(igv::Resource resource) : reader_(open_allowed_alignments(resource)) {
     if (!reader_->indexed()) throw std::runtime_error("An indexed BAM, CRAM, or SAM resource is required (.bai, .csi, or .crai).");
     if (resource.reference_uri) reference_ = igv::open_fasta({.uri = *resource.reference_uri});
 }
 
 bool EvidenceEngine::indexed() const noexcept { return reader_->indexed(); }
+
+PileupData EvidenceEngine::pileup(const VariantQuery& query, const FilterSettings& filters, const std::int64_t padding) const {
+    if (padding < 0 || padding > 1000) throw std::invalid_argument("Pileup padding must be between 0 and 1,000 bases.");
+    PileupData data;
+    data.query = query;
+    data.interval = query.query_window(padding);
+    if (reference_) {
+        data.reference_bases = reference_->get(data.interval);
+        data.has_reference = true;
+    }
+    for (const auto& alignment : reader_->get(data.interval)) {
+        if (include_alignment(alignment, filters)) data.alignments.push_back(alignment);
+    }
+    return data;
+}
 
 BatchEvidence EvidenceEngine::evaluate(const std::vector<Query>& queries, const FilterSettings& filters) const {
     BatchEvidence batch;

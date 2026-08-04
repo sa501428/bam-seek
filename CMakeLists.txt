@@ -34,7 +34,9 @@ if(BAM_SEEK_BUILD_GUI)
     qt_add_executable(bam-seek
         src/main.cpp
         src/main_window.cpp
+        src/pileup_view.cpp
         include/bamseek/main_window.hpp
+        include/bamseek/pileup_view.hpp
     )
     target_link_libraries(bam-seek PRIVATE bamseek::core Qt6::Concurrent Qt6::Widgets)
     target_compile_definitions(bam-seek PRIVATE BAM_SEEK_VERSION="${PROJECT_VERSION}")

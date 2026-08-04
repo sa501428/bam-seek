@@ -73,11 +73,20 @@ struct BatchEvidence {
     std::vector<std::string> errors;
 };
 
+struct PileupData {
+    VariantQuery query;
+    igv::GenomicInterval interval;
+    std::string reference_bases;
+    bool has_reference = false;
+    std::vector<igv::Alignment> alignments;
+};
+
 class EvidenceEngine {
 public:
     explicit EvidenceEngine(igv::Resource resource);
     [[nodiscard]] bool indexed() const noexcept;
     [[nodiscard]] BatchEvidence evaluate(const std::vector<Query>& queries, const FilterSettings& filters) const;
+    [[nodiscard]] PileupData pileup(const VariantQuery& query, const FilterSettings& filters, std::int64_t padding = 80) const;
 
 private:
     std::unique_ptr<igv::AlignmentReader> reader_;
