@@ -13,5 +13,7 @@ int main() {
     if (variant.position != 140453135 || variant.reference != "A" || variant.alternate != "T") return EXIT_FAILURE;
     const auto& region = std::get<bamseek::RegionQuery>(parsed.queries[1]);
     if (region.interval.start != 999 || region.interval.end != 1100) return EXIT_FAILURE;
+    const auto invalid = bamseek::parse_queries("chr1:10 A>A\nchr1:10 A><script>\n");
+    if (!invalid.queries.empty() || invalid.errors.size() != 2) return EXIT_FAILURE;
     return EXIT_SUCCESS;
 }

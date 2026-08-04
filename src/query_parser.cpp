@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <limits>
 #include <sstream>
 #include <string_view>
 
@@ -39,7 +40,12 @@ bool valid_allele(const std::string& allele) {
 
 bool supported_alleles(const std::string& reference, const std::string& alternate) {
     if (!valid_allele(reference) || !valid_allele(alternate)) return false;
+    if (reference == alternate || reference.size() > 10000 || alternate.size() > 10000) return false;
     return reference.size() == alternate.size() || reference.starts_with(alternate) || alternate.starts_with(reference);
+}
+
+bool safe_position(const std::int64_t one_based_position) {
+    return one_based_position <= std::numeric_limits<std::int64_t>::max() - 20000;
 }
 
 }  // namespace
@@ -55,6 +61,10 @@ ParsedQueries parse_queries(const std::string& text) {
     int line_number = 0;
     while (std::getline(lines, raw_line)) {
         ++line_number;
+        if (result.queries.size() + result.errors.size() >= 10000) {
+            result.errors.push_back("Input is limited to 10,000 query lines per batch");
+            break;
+        }
         const auto line = trim(raw_line);
         if (line.empty() || line.starts_with('#')) continue;
         std::istringstream fields(line);
@@ -69,7 +79,7 @@ ParsedQueries parse_queries(const std::string& text) {
             std::int64_t one_based_position{};
             const auto reference = uppercase(reference_text);
             const auto alternate = uppercase(alternate_text);
-            if (!parse_positive(position_text, one_based_position) || !supported_alleles(reference, alternate)) {
+            if (!parse_positive(position_text, one_based_position) || !safe_position(one_based_position) || !supported_alleles(reference, alternate)) {
                 result.errors.push_back("Line " + std::to_string(line_number) + ": invalid variant (small indels must be left-anchored)");
             } else {
                 result.queries.emplace_back(VariantQuery{line, contig, one_based_position - 1, reference, alternate});
@@ -91,7 +101,7 @@ ParsedQueries parse_queries(const std::string& text) {
             const auto allele_text = trim(payload.substr(allele_start));
             const auto allele_arrow = allele_text.find('>');
             std::int64_t one_based_position{};
-            if (allele_arrow == std::string::npos || !parse_positive(position_text, one_based_position)) {
+            if (allele_arrow == std::string::npos || !parse_positive(position_text, one_based_position) || !safe_position(one_based_position)) {
                 result.errors.push_back("Line " + std::to_string(line_number) + ": expected chr:position REF>ALT");
                 continue;
             }

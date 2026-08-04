@@ -42,6 +42,8 @@ struct EvidenceCounts {
     int reference_reads{};
     int alternate_reads{};
     int other_reads{};
+    int reference_forward_reads{};
+    int reference_reverse_reads{};
     int alternate_forward_reads{};
     int alternate_reverse_reads{};
     int reference_molecules{};
@@ -50,12 +52,15 @@ struct EvidenceCounts {
 
     [[nodiscard]] int depth() const noexcept { return reference_reads + alternate_reads + other_reads; }
     [[nodiscard]] double allele_fraction() const noexcept;
+    [[nodiscard]] std::optional<double> strand_bias_p_value() const noexcept;
 };
 
 struct VariantEvidence {
     VariantQuery query;
     EvidenceCounts counts;
     std::string molecule_tag_used;
+    bool molecule_counts_available = false;
+    int reads_missing_molecule_tag{};
     bool passes_thresholds = false;
     std::vector<ReadEvidence> reads;
 };
@@ -78,7 +83,10 @@ struct PileupData {
     igv::GenomicInterval interval;
     std::string reference_bases;
     bool has_reference = false;
+    int minimum_base_quality{};
     std::vector<igv::Alignment> alignments;
+    std::size_t total_alignments{};
+    bool truncated = false;
 };
 
 class EvidenceEngine {

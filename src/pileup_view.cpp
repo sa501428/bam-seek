@@ -137,9 +137,14 @@ void PileupView::paintEvent(QPaintEvent*) {
                     if (position < data_.interval.start || position >= data_.interval.end) continue;
                     const int x = left_margin + static_cast<int>(position - data_.interval.start) * cell_width;
                     const char base = static_cast<char>(std::toupper(static_cast<unsigned char>(alignment.sequence[read_position + offset])));
+                    const int quality = read_position + offset < alignment.qualities.size()
+                        ? static_cast<int>(static_cast<unsigned char>(alignment.qualities[read_position + offset])) - 33
+                        : 0;
+                    const bool low_quality = quality < data_.minimum_base_quality;
                     const bool mismatch = data_.has_reference && base != reference_at(data_, position);
-                    painter.fillRect(x, y, cell_width - 1, row_height - 2, mismatch ? QColor(255, 222, 89) : fill);
-                    painter.setPen(Qt::black);
+                    painter.fillRect(x, y, cell_width - 1, row_height - 2,
+                                     low_quality ? QColor(225, 225, 225) : mismatch ? QColor(255, 222, 89) : fill);
+                    painter.setPen(low_quality ? QColor(130, 130, 130) : Qt::black);
                     painter.drawText(x + 2, y + 12, QString(base));
                 }
                 reference_position += static_cast<std::int64_t>(operation_length);

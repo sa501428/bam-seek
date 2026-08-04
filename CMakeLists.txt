@@ -5,6 +5,7 @@ project(bam_seek VERSION 0.1.0 LANGUAGES CXX)
 include(CTest)
 
 option(BAM_SEEK_BUILD_GUI "Build the Qt desktop application" ON)
+option(BAM_SEEK_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 set(IGVCPP_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../igv-cpp" CACHE PATH
     "Path to the igv-cpp source checkout")
 
@@ -27,6 +28,10 @@ target_link_libraries(bam_seek_core PUBLIC igv::igv)
 target_compile_options(bam_seek_core PRIVATE
     $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wall;-Wextra;-Wpedantic;-Wconversion;-Wsign-conversion>
 )
+if(BAM_SEEK_ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "AppleClang|Clang|GNU")
+    target_compile_options(bam_seek_core PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(bam_seek_core PUBLIC -fsanitize=address,undefined)
+endif()
 
 if(BAM_SEEK_BUILD_GUI)
     find_package(Qt6 6.5 REQUIRED COMPONENTS Concurrent Widgets)
@@ -53,17 +58,28 @@ if(BUILD_TESTING)
         set(BAM_SEEK_TEST_DATA "${CMAKE_CURRENT_BINARY_DIR}/generated")
         add_custom_command(
             OUTPUT "${BAM_SEEK_TEST_DATA}/reads.bam" "${BAM_SEEK_TEST_DATA}/reads.bam.bai"
+                   "${BAM_SEEK_TEST_DATA}/evidence.bam" "${BAM_SEEK_TEST_DATA}/evidence.bam.bai"
+                   "${BAM_SEEK_TEST_DATA}/evidence_reference.fa" "${BAM_SEEK_TEST_DATA}/evidence_reference.fa.fai"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${BAM_SEEK_TEST_DATA}"
             COMMAND "${SAMTOOLS_EXECUTABLE}" view -b -o "${BAM_SEEK_TEST_DATA}/reads.bam" "${IGVCPP_SOURCE_DIR}/tests/data/reads.sam"
             COMMAND "${SAMTOOLS_EXECUTABLE}" index -o "${BAM_SEEK_TEST_DATA}/reads.bam.bai" "${BAM_SEEK_TEST_DATA}/reads.bam"
-            DEPENDS "${IGVCPP_SOURCE_DIR}/tests/data/reads.sam"
+            COMMAND "${SAMTOOLS_EXECUTABLE}" view -b -o "${BAM_SEEK_TEST_DATA}/evidence.bam" "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/evidence.sam"
+            COMMAND "${SAMTOOLS_EXECUTABLE}" index -o "${BAM_SEEK_TEST_DATA}/evidence.bam.bai" "${BAM_SEEK_TEST_DATA}/evidence.bam"
+            COMMAND "${CMAKE_COMMAND}" -E copy "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/evidence_reference.fa" "${BAM_SEEK_TEST_DATA}/evidence_reference.fa"
+            COMMAND "${SAMTOOLS_EXECUTABLE}" faidx "${BAM_SEEK_TEST_DATA}/evidence_reference.fa"
+            DEPENDS "${IGVCPP_SOURCE_DIR}/tests/data/reads.sam" tests/data/evidence.sam tests/data/evidence_reference.fa
         )
-        add_custom_target(bam_seek_test_bam DEPENDS "${BAM_SEEK_TEST_DATA}/reads.bam" "${BAM_SEEK_TEST_DATA}/reads.bam.bai")
+        add_custom_target(bam_seek_test_bam DEPENDS
+            "${BAM_SEEK_TEST_DATA}/reads.bam" "${BAM_SEEK_TEST_DATA}/reads.bam.bai"
+            "${BAM_SEEK_TEST_DATA}/evidence.bam" "${BAM_SEEK_TEST_DATA}/evidence.bam.bai"
+            "${BAM_SEEK_TEST_DATA}/evidence_reference.fa" "${BAM_SEEK_TEST_DATA}/evidence_reference.fa.fai")
         add_executable(bam_seek_evidence_tests tests/test_evidence_engine.cpp)
         add_dependencies(bam_seek_evidence_tests bam_seek_test_bam)
         target_compile_definitions(bam_seek_evidence_tests PRIVATE
             BAM_SEEK_TEST_BAM="${BAM_SEEK_TEST_DATA}/reads.bam"
             BAM_SEEK_TEST_REFERENCE="${IGVCPP_SOURCE_DIR}/tests/data/reference.fa"
+            BAM_SEEK_EVIDENCE_BAM="${BAM_SEEK_TEST_DATA}/evidence.bam"
+            BAM_SEEK_EVIDENCE_REFERENCE="${BAM_SEEK_TEST_DATA}/evidence_reference.fa"
         )
         target_link_libraries(bam_seek_evidence_tests PRIVATE bamseek::core)
         add_test(NAME bam_seek_evidence_tests COMMAND bam_seek_evidence_tests)
