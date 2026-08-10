@@ -288,6 +288,14 @@ std::string molecule_key(const igv::Alignment& alignment, const std::string& tag
     return key.str();
 }
 
+std::string fragment_key(const igv::Alignment& alignment) {
+    if (!alignment.name.empty()) return "pair|" + alignment.name;
+    std::ostringstream key;
+    key << "alignment|" << alignment.interval.contig << ':' << alignment.interval.start << '-'
+        << alignment.interval.end << '|' << alignment.flags;
+    return key.str();
+}
+
 void add_count(EvidenceCounts& counts, const Allele allele, const bool reverse) {
     switch (allele) {
         case Allele::reference:
@@ -328,14 +336,19 @@ VariantEvidence evaluate_variant(const igv::AlignmentReader& reader, const Varia
         called_reads.push_back({&alignment, called});
         callable_alignments.push_back(&alignment);
     }
-    evidence.molecule_tag_used = choose_tag(callable_alignments, filters);
+    const auto selected_tag = choose_tag(callable_alignments, filters);
     std::unordered_map<std::string, std::vector<Allele>> molecule_calls;
+    bool used_fragment_fallback = false;
     for (const auto& called_read : called_reads) {
         const auto& alignment = *called_read.alignment;
         const auto called = called_read.call;
         const bool reverse = (alignment.flags & flag_reverse) != 0;
-        const auto molecule_id = evidence.molecule_tag_used.empty() ? std::string{} : molecule_key(alignment, evidence.molecule_tag_used);
-        if (!evidence.molecule_tag_used.empty() && molecule_id.empty()) ++evidence.reads_missing_molecule_tag;
+        auto molecule_id = selected_tag.empty() ? std::string{} : molecule_key(alignment, selected_tag);
+        if (molecule_id.empty()) {
+            if (!selected_tag.empty()) ++evidence.reads_missing_molecule_tag;
+            molecule_id = fragment_key(alignment);
+            used_fragment_fallback = true;
+        }
         std::ostringstream summary;
         summary << allele_name(called.allele) << " mapQ=" << static_cast<int>(alignment.mapping_quality)
                 << " baseQ=" << called.minimum_base_quality << " CIGAR=";
@@ -343,18 +356,23 @@ VariantEvidence evaluate_variant(const igv::AlignmentReader& reader, const Varia
         evidence.reads.push_back({alignment.name, called.allele, reverse, alignment.mapping_quality,
                                   called.minimum_base_quality, molecule_id, summary.str()});
         add_count(evidence.counts, called.allele, reverse);
-        if (!molecule_id.empty()) molecule_calls[molecule_id].push_back(called.allele);
+        molecule_calls[molecule_id].push_back(called.allele);
     }
     for (const auto& [identifier, calls] : molecule_calls) {
         (void)identifier;
         const auto alt = static_cast<int>(std::count(calls.begin(), calls.end(), Allele::alternate));
         const auto ref = static_cast<int>(std::count(calls.begin(), calls.end(), Allele::reference));
-        add_molecule_count(evidence.counts, alt > ref ? Allele::alternate : ref > alt ? Allele::reference : Allele::other);
+        const auto other = static_cast<int>(std::count(calls.begin(), calls.end(), Allele::other));
+        add_molecule_count(evidence.counts,
+            alt > ref && alt > other ? Allele::alternate
+            : ref > alt && ref > other ? Allele::reference
+            : Allele::other);
     }
-    evidence.molecule_counts_available = !evidence.molecule_tag_used.empty() && !molecule_calls.empty();
-    const bool molecule_threshold_met = filters.molecule_mode == MoleculeMode::raw_reads
-        || (filters.molecule_mode == MoleculeMode::auto_detect && !evidence.molecule_counts_available)
-        || (evidence.molecule_counts_available && evidence.counts.alternate_molecules >= filters.minimum_alternate_molecules);
+    evidence.molecule_counts_available = !molecule_calls.empty();
+    evidence.molecule_tag_used = selected_tag.empty() ? "read pairs/fragments" : selected_tag;
+    if (!selected_tag.empty() && used_fragment_fallback) evidence.molecule_tag_used += " + pair fallback";
+    const bool molecule_threshold_met = evidence.molecule_counts_available
+        && evidence.counts.alternate_molecules >= filters.minimum_alternate_molecules;
     evidence.passes_thresholds = evidence.counts.alternate_reads >= filters.minimum_alternate_reads
         && evidence.counts.allele_fraction() >= filters.minimum_variant_allele_fraction
         && molecule_threshold_met;
@@ -374,7 +392,13 @@ double hypergeometric_probability(const int x, const int row_one, const int colu
 }  // namespace
 
 double EvidenceCounts::allele_fraction() const noexcept {
-    return depth() == 0 ? 0.0 : static_cast<double>(alternate_reads) / static_cast<double>(depth());
+    const auto denominator = informative_read_depth();
+    return denominator == 0 ? 0.0 : static_cast<double>(alternate_reads) / static_cast<double>(denominator);
+}
+
+double EvidenceCounts::molecule_allele_fraction() const noexcept {
+    const auto denominator = molecule_depth();
+    return denominator == 0 ? 0.0 : static_cast<double>(alternate_molecules) / static_cast<double>(denominator);
 }
 
 std::optional<double> EvidenceCounts::strand_bias_p_value() const noexcept {

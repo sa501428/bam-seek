@@ -58,6 +58,17 @@ if(BAM_SEEK_BUILD_GUI)
         target_include_directories(bam_seek_receiver_tests PRIVATE include)
         target_link_libraries(bam_seek_receiver_tests PRIVATE Qt6::Core Qt6::Network)
         add_test(NAME bam_seek_receiver_tests COMMAND bam_seek_receiver_tests)
+
+        add_executable(bam_seek_pileup_tests
+            tests/test_pileup_view.cpp
+            src/pileup_view.cpp
+            include/bamseek/pileup_view.hpp
+        )
+        target_compile_definitions(bam_seek_pileup_tests PRIVATE
+            BAM_SEEK_JAK2_PILEUP_BAM="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/jak2/jak2_v617f_25pct_150x.bam")
+        target_link_libraries(bam_seek_pileup_tests PRIVATE bamseek::core Qt6::Widgets)
+        add_test(NAME bam_seek_pileup_tests COMMAND bam_seek_pileup_tests)
+        set_tests_properties(bam_seek_pileup_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     endif()
 endif()
 

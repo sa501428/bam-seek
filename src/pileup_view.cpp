@@ -23,10 +23,31 @@ QColor strand_color(const bool reverse) {
 
 bool reverse_strand(const igv::Alignment& alignment) { return (alignment.flags & 0x10U) != 0; }
 
+QString short_read_name(const std::string& name) {
+    const auto text = QString::fromStdString(name);
+    return text.size() <= 11 ? text : text.right(11);
+}
+
 char reference_at(const PileupData& data, const std::int64_t position) {
     const auto offset = position - data.interval.start;
-    if (!data.has_reference || offset < 0 || static_cast<std::size_t>(offset) >= data.reference_bases.size()) return 'N';
+    if (!data.has_reference || offset < 0 || static_cast<std::size_t>(offset) >= data.reference_bases.size()) {
+        if (position >= data.query.position
+            && position < data.query.position + static_cast<std::int64_t>(data.query.reference.size())) {
+            return static_cast<char>(std::toupper(static_cast<unsigned char>(
+                data.query.reference[static_cast<std::size_t>(position - data.query.position)])));
+        }
+        return 'N';
+    }
     return static_cast<char>(std::toupper(static_cast<unsigned char>(data.reference_bases[static_cast<std::size_t>(offset)])));
+}
+
+bool has_reference_at(const PileupData& data, const std::int64_t position) {
+    if (data.has_reference) {
+        const auto offset = position - data.interval.start;
+        if (offset >= 0 && static_cast<std::size_t>(offset) < data.reference_bases.size()) return true;
+    }
+    return position >= data.query.position
+        && position < data.query.position + static_cast<std::int64_t>(data.query.reference.size());
 }
 
 }  // namespace
@@ -34,12 +55,14 @@ char reference_at(const PileupData& data, const std::int64_t position) {
 PileupView::PileupView(QWidget* parent) : QWidget(parent) {
     setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
     setAutoFillBackground(true);
+    setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 }
 
 void PileupView::set_data(PileupData data) {
     data_ = std::move(data);
     rebuild_layout();
     updateGeometry();
+    resize(sizeHint());
     update();
 }
 
@@ -55,6 +78,11 @@ QSize PileupView::sizeHint() const {
     const auto columns = std::max<std::int64_t>(1, data_.interval.end - data_.interval.start);
     const auto row_count = rows_.empty() ? 1 : *std::max_element(rows_.begin(), rows_.end()) + 1;
     return {left_margin + static_cast<int>(columns) * cell_width + 20, top_margin + row_count * row_height + 30};
+}
+
+int PileupView::variant_x() const noexcept {
+    if (data_.interval.contig.empty()) return 0;
+    return left_margin + static_cast<int>(data_.query.position - data_.interval.start) * cell_width + cell_width / 2;
 }
 
 void PileupView::rebuild_layout() {
@@ -91,6 +119,8 @@ void PileupView::paintEvent(QPaintEvent*) {
 
     painter.setPen(QColor(70, 70, 70));
     painter.drawText(8, 17, QString::fromStdString(data_.interval.contig));
+    painter.drawText(left_margin, height() - 8,
+        QString("%1 filtered alignment(s)%2").arg(data_.total_alignments).arg(data_.truncated ? " (display truncated)" : ""));
     const auto length = data_.interval.end - data_.interval.start;
     for (std::int64_t offset = 0; offset < length; ++offset) {
         const auto position = data_.interval.start + offset;
@@ -102,6 +132,12 @@ void PileupView::paintEvent(QPaintEvent*) {
         }
         painter.setPen(QColor(50, 50, 50));
         painter.drawText(x + 2, top_margin - 2, QString(reference_at(data_, position)));
+    }
+
+    if (data_.alignments.empty()) {
+        painter.setPen(QColor(158, 42, 43));
+        painter.drawText(12, top_margin + 24, "No alignments passed the current mapQ/flag filters in this window.");
+        return;
     }
 
     if (group_pairs_) {
@@ -125,7 +161,7 @@ void PileupView::paintEvent(QPaintEvent*) {
         const auto& alignment = data_.alignments[index];
         const int y = top_margin + rows_[index] * row_height;
         painter.setPen(QColor(70, 70, 70));
-        painter.drawText(2, y + 12, QString::fromStdString(alignment.name).left(11));
+        painter.drawText(2, y + 12, short_read_name(alignment.name));
         const auto fill = strand_color(reverse_strand(alignment));
         auto reference_position = alignment.interval.start;
         std::size_t read_position = 0;
@@ -141,7 +177,7 @@ void PileupView::paintEvent(QPaintEvent*) {
                         ? static_cast<int>(static_cast<unsigned char>(alignment.qualities[read_position + offset])) - 33
                         : 0;
                     const bool low_quality = quality < data_.minimum_base_quality;
-                    const bool mismatch = data_.has_reference && base != reference_at(data_, position);
+                    const bool mismatch = has_reference_at(data_, position) && base != reference_at(data_, position);
                     painter.fillRect(x, y, cell_width - 1, row_height - 2,
                                      low_quality ? QColor(225, 225, 225) : mismatch ? QColor(255, 222, 89) : fill);
                     painter.setPen(low_quality ? QColor(130, 130, 130) : Qt::black);

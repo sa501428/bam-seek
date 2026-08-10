@@ -65,11 +65,28 @@ QString display_query(const VariantQuery& query) {
 
 QString mode_name(const MoleculeMode mode) {
     switch (mode) {
-        case MoleculeMode::raw_reads: return "Raw reads";
-        case MoleculeMode::auto_detect: return "Auto-detect (MI, RX, UB)";
-        case MoleculeMode::selected_tag: return "Selected tag";
+        case MoleculeMode::raw_reads: return "Read pairs/fragments (no UMI)";
+        case MoleculeMode::auto_detect: return "Auto-detect UMI; pair fallback";
+        case MoleculeMode::selected_tag: return "Selected UMI tag; pair fallback";
     }
     return "Unknown";
+}
+
+QString evidence_summary(const VariantEvidence& evidence) {
+    const auto& counts = evidence.counts;
+    const auto query = display_query(evidence.query);
+    const auto read_vaf = QString::number(counts.allele_fraction() * 100.0, 'f', 4) + '%';
+    if (!evidence.molecule_counts_available) {
+        return QString("For %1, ALT (%2) was seen in %3/%4 individual reads (read VAF %5); molecule consensus was unavailable. %6 OTHER/N read(s) were excluded from VAF.")
+            .arg(query, QString::fromStdString(evidence.query.alternate))
+            .arg(counts.alternate_reads).arg(counts.informative_read_depth()).arg(read_vaf).arg(counts.other_reads);
+    }
+    const auto molecule_vaf = QString::number(counts.molecule_allele_fraction() * 100.0, 'f', 4) + '%';
+    return QString("For %1, ALT (%2) was seen in %3/%4 consensus reads (unique molecules; molecule VAF %5) and %6/%7 individual reads (read VAF %8). %9 OTHER/N read(s) and %10 ambiguous molecule(s) were excluded from VAF.")
+        .arg(query, QString::fromStdString(evidence.query.alternate))
+        .arg(counts.alternate_molecules).arg(counts.molecule_depth()).arg(molecule_vaf)
+        .arg(counts.alternate_reads).arg(counts.informative_read_depth()).arg(read_vaf)
+        .arg(counts.other_reads).arg(counts.other_molecules);
 }
 
 QString sanitized_resource_uri(const QString& path) {
@@ -217,9 +234,9 @@ MainWindow::MainWindow() {
 
     auto* settings = new QHBoxLayout();
     molecule_mode_ = new QComboBox(root);
-    molecule_mode_->addItem("Auto-detect (MI, RX, UB)", static_cast<int>(MoleculeMode::auto_detect));
-    molecule_mode_->addItem("Raw reads only", static_cast<int>(MoleculeMode::raw_reads));
-    molecule_mode_->addItem("Selected BAM tag", static_cast<int>(MoleculeMode::selected_tag));
+    molecule_mode_->addItem("Auto UMI; pair fallback", static_cast<int>(MoleculeMode::auto_detect));
+    molecule_mode_->addItem("Read pairs / fragments", static_cast<int>(MoleculeMode::raw_reads));
+    molecule_mode_->addItem("Selected UMI tag; pair fallback", static_cast<int>(MoleculeMode::selected_tag));
     molecule_tag_ = new QLineEdit(root);
     molecule_tag_->setPlaceholderText("e.g. MI");
     molecule_tag_->setEnabled(false);
@@ -269,8 +286,10 @@ MainWindow::MainWindow() {
     evidence_layout->setContentsMargins(0, 0, 0, 0);
     auto* splitter = new QSplitter(Qt::Vertical, evidence_tab);
     results_ = new QTableWidget(splitter);
-    results_->setColumnCount(13);
-    results_->setHorizontalHeaderLabels({"BAM / CRAM", "Query", "Status", "Depth", "Alt reads", "VAF", "Alt Fwd", "Alt Rev", "Strand P", "Alt molecules", "Ref molecules", "Molecule tag", "Notes"});
+    results_->setColumnCount(19);
+    results_->setHorizontalHeaderLabels({"BAM / CRAM", "Query", "Status", "REF reads", "ALT reads", "REF+ALT reads", "Read VAF",
+        "REF molecules", "ALT molecules", "REF+ALT molecules", "Molecule VAF", "OTHER/N reads", "Ambiguous molecules",
+        "ALT Fwd", "ALT Rev", "Strand P", "Molecule grouping", "Missing tags", "Evidence summary"});
     results_->setSelectionBehavior(QAbstractItemView::SelectRows);
     results_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     results_->horizontalHeader()->setStretchLastSection(true);
@@ -291,11 +310,17 @@ MainWindow::MainWindow() {
     pileup_controls->addWidget(new QLabel("Blue: forward   Red: reverse   Yellow: mismatch   Green: indel   Gray: low base quality", pileup_tab));
     pileup_controls->addStretch(1);
     pileup_layout->addLayout(pileup_controls);
-    auto* pileup_scroll = new QScrollArea(pileup_tab);
-    pileup_view_ = new PileupView(pileup_scroll);
-    pileup_scroll->setWidget(pileup_view_);
-    pileup_scroll->setWidgetResizable(false);
-    pileup_layout->addWidget(pileup_scroll);
+    pileup_summary_ = new QLabel(pileup_tab);
+    pileup_summary_->setWordWrap(true);
+    pileup_summary_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    pileup_summary_->setText("Select a targeted variant result and choose View pileup.");
+    pileup_layout->addWidget(pileup_summary_);
+    pileup_scroll_ = new QScrollArea(pileup_tab);
+    pileup_scroll_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    pileup_view_ = new PileupView(pileup_scroll_);
+    pileup_scroll_->setWidget(pileup_view_);
+    pileup_scroll_->setWidgetResizable(false);
+    pileup_layout->addWidget(pileup_scroll_);
     tabs_->addTab(pileup_tab, "Pileup");
     auto* broadcast_tab = new QWidget(tabs_);
     auto* broadcast_layout = new QVBoxLayout(broadcast_tab);
@@ -591,16 +616,19 @@ void MainWindow::show_results() {
         const auto& result = last_batch_.results[static_cast<std::size_t>(index)];
         if (const auto* evidence = std::get_if<VariantEvidence>(&result)) {
             const auto& count = evidence->counts;
-            QString notes = QString("%1 callable reads; threshold %2")
-                .arg(evidence->reads.size()).arg(evidence->passes_thresholds ? "met" : "not met");
-            if (evidence->reads_missing_molecule_tag > 0) notes += QString("; %1 missing molecule tag").arg(evidence->reads_missing_molecule_tag);
             const auto strand_p = count.strand_bias_p_value();
-            const QList<QString> values{resource_label(result_bam_paths_[index]), display_query(evidence->query), evidence->passes_thresholds ? "PRESENT" : "not detected", QString::number(count.depth()),
-                QString::number(count.alternate_reads), QString::number(count.allele_fraction() * 100.0, 'f', 4) + '%', QString::number(count.alternate_forward_reads),
-                QString::number(count.alternate_reverse_reads), strand_p ? QString::number(*strand_p, 'g', 3) : "N/A",
-                evidence->molecule_counts_available ? QString::number(count.alternate_molecules) : "N/A",
+            const QList<QString> values{resource_label(result_bam_paths_[index]), display_query(evidence->query), evidence->passes_thresholds ? "PRESENT" : "not detected",
+                QString::number(count.reference_reads), QString::number(count.alternate_reads), QString::number(count.informative_read_depth()),
+                QString::number(count.allele_fraction() * 100.0, 'f', 4) + '%',
                 evidence->molecule_counts_available ? QString::number(count.reference_molecules) : "N/A",
-                QString::fromStdString(evidence->molecule_counts_available ? evidence->molecule_tag_used : "Unavailable"), notes};
+                evidence->molecule_counts_available ? QString::number(count.alternate_molecules) : "N/A",
+                evidence->molecule_counts_available ? QString::number(count.molecule_depth()) : "N/A",
+                evidence->molecule_counts_available ? QString::number(count.molecule_allele_fraction() * 100.0, 'f', 4) + '%' : "N/A",
+                QString::number(count.other_reads), evidence->molecule_counts_available ? QString::number(count.other_molecules) : "N/A",
+                QString::number(count.alternate_forward_reads), QString::number(count.alternate_reverse_reads),
+                strand_p ? QString::number(*strand_p, 'g', 3) : "N/A",
+                QString::fromStdString(evidence->molecule_counts_available ? evidence->molecule_tag_used : "Unavailable"),
+                QString::number(evidence->reads_missing_molecule_tag), evidence_summary(*evidence)};
             for (int column = 0; column < values.size(); ++column) {
                 auto* item = new QTableWidgetItem(values[column]);
                 if (column == 0) item->setToolTip(sanitized_resource_uri(result_bam_paths_[index]));
@@ -608,7 +636,11 @@ void MainWindow::show_results() {
             }
         } else {
             const auto& region = std::get<RegionEvidence>(result);
-            const QList<QString> values{resource_label(result_bam_paths_[index]), QString::fromStdString(region.query.source_text), region.candidates.empty() ? "NO CANDIDATES" : "CANDIDATES", "", QString::number(region.candidates.size()), "", "", "", "", "", "", "", QString::fromStdString(region.note)};
+            QList<QString> values(19);
+            values[0] = resource_label(result_bam_paths_[index]);
+            values[1] = QString::fromStdString(region.query.source_text);
+            values[2] = region.candidates.empty() ? "NO CANDIDATES" : "CANDIDATES";
+            values[18] = QString::fromStdString(region.note);
             for (int column = 0; column < values.size(); ++column) {
                 auto* item = new QTableWidgetItem(values[column]);
                 if (column == 0) item->setToolTip(sanitized_resource_uri(result_bam_paths_[index]));
@@ -635,15 +667,13 @@ void MainWindow::show_read_details(const int row, const int) {
         const auto& region = std::get<RegionEvidence>(last_batch_.results[static_cast<std::size_t>(row)]);
         QString text = "Alignment: " + sanitized_resource_uri(result_bam_paths_[row]) + "\n" + QString::fromStdString(region.note) + "\n\n";
         for (const auto& candidate : region.candidates) {
-            text += display_query(candidate.query) + "  depth=" + QString::number(candidate.counts.depth())
-                + "  alt=" + QString::number(candidate.counts.alternate_reads)
-                + "  VAF=" + QString::number(candidate.counts.allele_fraction() * 100.0, 'f', 4) + "%\n";
+            text += evidence_summary(candidate) + '\n';
         }
         read_details_->setPlainText(text);
         return;
     }
-    QString text = "Alignment: " + sanitized_resource_uri(result_bam_paths_[row]) + "\nQuery: " + display_query(evidence->query) + "\nMolecule grouping: "
-        + QString::fromStdString(evidence->molecule_counts_available ? evidence->molecule_tag_used : "unavailable") + "\n\n";
+    QString text = "Alignment: " + sanitized_resource_uri(result_bam_paths_[row]) + "\n" + evidence_summary(*evidence)
+        + "\nMolecule grouping: " + QString::fromStdString(evidence->molecule_counts_available ? evidence->molecule_tag_used : "unavailable") + "\n\n";
     for (const auto& read : evidence->reads) {
         text += QString::fromStdString(read.read_name) + (read.reverse_strand ? "  reverse  " : "  forward  ")
             + QString::fromStdString(read.summary);
@@ -670,18 +700,20 @@ void MainWindow::show_pileup() {
     const auto reference = last_reference_path_.toStdString();
     const auto query = evidence->query;
     const auto filter_values = last_filters_;
+    const auto summary = evidence_summary(*evidence);
     pileup_button_->setEnabled(false);
     load_bams_button_->setEnabled(false);
     clear_bams_button_->setEnabled(false);
     status_->setText("Loading local alignment pileup…");
-    pileup_watcher_.setFuture(QtConcurrent::run([bam, index, reference, query, filter_values] {
+    pileup_watcher_.setFuture(QtConcurrent::run([bam, index, reference, query, filter_values, summary] {
         PileupLoad loaded;
+        loaded.summary = summary;
         try {
             igv::Resource resource{.uri = bam};
             if (!index.empty()) resource.index_uri = index;
             if (!reference.empty()) resource.reference_uri = reference;
             EvidenceEngine engine(std::move(resource));
-            loaded.data = engine.pileup(query, filter_values);
+            loaded.data = engine.pileup(query, filter_values, 40);
         } catch (const std::exception& error) {
             loaded.error = sanitized_error(error.what(), {bam, index, reference});
         }
@@ -697,10 +729,13 @@ void MainWindow::pileup_loaded() {
     if (!loaded.error.empty()) {
         QMessageBox::warning(this, "Pileup unavailable", QString::fromStdString(loaded.error));
         status_->setText("Could not load pileup.");
+        pileup_summary_->setText("Pileup unavailable: " + QString::fromStdString(loaded.error));
         return;
     }
     pileup_view_->set_data(loaded.data);
+    pileup_summary_->setText(loaded.summary);
     tabs_->setCurrentIndex(1);
+    pileup_scroll_->ensureVisible(pileup_view_->variant_x(), 0, 120, 20);
     status_->setText(QString("Rendered %1 of %2 filtered alignments locally%3.")
         .arg(loaded.data.alignments.size()).arg(loaded.data.total_alignments).arg(loaded.data.truncated ? " (display limit reached)" : ""));
 }
@@ -726,7 +761,9 @@ void MainWindow::export_audit() {
         {"include_duplicates", last_filters_.include_duplicates}, {"include_secondary", last_filters_.include_secondary}, {"include_supplementary", last_filters_.include_supplementary}};
     QJsonArray result_array;
     const auto variant_json = [](const VariantEvidence& evidence) {
-        QJsonObject row{{"query", display_query(evidence.query)}, {"present", evidence.passes_thresholds}, {"depth", evidence.counts.depth()},
+        QJsonObject row{{"query", display_query(evidence.query)}, {"present", evidence.passes_thresholds},
+            {"depth", evidence.counts.depth()}, {"total_called_reads", evidence.counts.depth()},
+            {"informative_read_depth", evidence.counts.informative_read_depth()},
             {"gene", QString::fromStdString(evidence.query.gene)}, {"transcript", QString::fromStdString(evidence.query.transcript)},
             {"coding_change", QString::fromStdString(evidence.query.coding_change)}, {"protein_change", QString::fromStdString(evidence.query.protein_change)},
             {"contig", QString::fromStdString(evidence.query.contig)}, {"position_one_based", evidence.query.position + 1},
@@ -734,11 +771,16 @@ void MainWindow::export_audit() {
             {"ref_reads", evidence.counts.reference_reads}, {"other_reads", evidence.counts.other_reads},
             {"ref_forward_reads", evidence.counts.reference_forward_reads}, {"ref_reverse_reads", evidence.counts.reference_reverse_reads},
             {"alt_reads", evidence.counts.alternate_reads}, {"alt_forward_reads", evidence.counts.alternate_forward_reads},
-            {"alt_reverse_reads", evidence.counts.alternate_reverse_reads}, {"vaf", evidence.counts.allele_fraction()},
+            {"alt_reverse_reads", evidence.counts.alternate_reverse_reads}, {"read_vaf", evidence.counts.allele_fraction()},
+            {"vaf", evidence.counts.allele_fraction()},
             {"molecule_counts_available", evidence.molecule_counts_available}, {"reads_missing_molecule_tag", evidence.reads_missing_molecule_tag},
-            {"molecule_tag", QString::fromStdString(evidence.molecule_tag_used)}};
+            {"molecule_tag", QString::fromStdString(evidence.molecule_tag_used)},
+            {"molecule_grouping", QString::fromStdString(evidence.molecule_tag_used)}, {"evidence_summary", evidence_summary(evidence)}};
         row["alt_molecules"] = evidence.molecule_counts_available ? QJsonValue(evidence.counts.alternate_molecules) : QJsonValue::Null;
         row["ref_molecules"] = evidence.molecule_counts_available ? QJsonValue(evidence.counts.reference_molecules) : QJsonValue::Null;
+        row["other_molecules"] = evidence.molecule_counts_available ? QJsonValue(evidence.counts.other_molecules) : QJsonValue::Null;
+        row["informative_molecule_depth"] = evidence.molecule_counts_available ? QJsonValue(evidence.counts.molecule_depth()) : QJsonValue::Null;
+        row["molecule_vaf"] = evidence.molecule_counts_available ? QJsonValue(evidence.counts.molecule_allele_fraction()) : QJsonValue::Null;
         const auto strand_p = evidence.counts.strand_bias_p_value();
         row["strand_bias_fisher_p"] = strand_p ? QJsonValue(*strand_p) : QJsonValue::Null;
         QJsonArray reads;

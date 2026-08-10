@@ -18,7 +18,7 @@ chr1:100000-101000
 BRAF c.1799T>A p.V600E chr7:140453136 A>T
 ```
 
-Variant coordinates are one-based. The engine evaluates SNVs, MNVs, and VCF-style small indels against aligned reads; reports ref/alt/other read counts, strand-specific counts, a two-sided Fisher strand-bias p-value, molecule counts when available, and per-read summaries. Molecule grouping can use an auto-detected `MI`, `RX`, or `UB` tag or a selected two-character BAM tag. Auto-detection requires the tag on at least 90% of callable reads; otherwise molecule counts are explicitly unavailable. `RX`/`UB` grouping incorporates fragment coordinates, and `UB` also incorporates `CB` when present.
+Variant coordinates are one-based. The engine evaluates SNVs, MNVs, and VCF-style small indels against aligned reads; reports REF/ALT/OTHER read counts, strand-specific counts, a two-sided Fisher strand-bias p-value, pair-aware molecule consensus, and per-read summaries. Read VAF is strictly `ALT reads / (REF reads + ALT reads)` and molecule VAF is `ALT molecules / (REF molecules + ALT molecules)`; OTHER, `N`, and ambiguous molecule calls are shown but excluded from both denominators. Molecule grouping uses an auto-detected `MI`, `RX`, or `UB` tag when sufficiently represented, otherwise paired reads are collapsed by read name into one fragment consensus. Missing selected-tag values also fall back to their read pair/fragment rather than silently disappearing.
 
 Four-column `CHROM POS REF ALT` and standard VCF rows are also accepted.
 Genomic HGVS substitutions such as `chr7:g.140453136A>T` are accepted as well.
@@ -46,7 +46,7 @@ An existing BAM/CRAM index is required. The app supports an explicit local or HT
 
 Region scans require an indexed reference FASTA and currently discover small SNV candidates in windows up to 100 kb. Small indel discovery remains follow-on work; the current per-read text panel and graphical pileup provide inspectable evidence.
 
-Targeted variant rows can be opened in the **Pileup** tab. This local rendering colors forward reads blue, reverse reads red, reference mismatches yellow, and indels green; it can also group and link read pairs by name.
+Targeted variant rows can be opened in the **Pileup** tab. The view now sizes itself as scrollable content, automatically centers the requested variant, shows the evidence sentence above the reads, and displays the requested REF base even when no FASTA is configured. This local rendering colors forward reads blue, reverse reads red, reference mismatches yellow, and indels green; it can also group and link read pairs by name.
 
 ## Build
 

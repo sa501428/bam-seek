@@ -57,10 +57,13 @@ int main() {
     const auto snv_batch = evidence_engine.evaluate({bamseek::VariantQuery{"chr1:15 A>T", "chr1", 14, "A", "T"}}, molecule_filters);
     if (!snv_batch.errors.empty() || snv_batch.results.size() != 1) return EXIT_FAILURE;
     const auto& snv = std::get<bamseek::VariantEvidence>(snv_batch.results.front());
-    if (snv.counts.reference_reads != 2 || snv.counts.alternate_reads != 3 || snv.counts.other_reads != 1
+    if (snv.counts.reference_reads != 2 || snv.counts.alternate_reads != 3 || snv.counts.other_reads != 2
         || snv.counts.reference_forward_reads != 1 || snv.counts.reference_reverse_reads != 1
         || snv.counts.alternate_forward_reads != 2 || snv.counts.alternate_reverse_reads != 1
-        || !snv.molecule_counts_available || snv.counts.alternate_molecules != 2 || snv.counts.reference_molecules != 2
+        || std::abs(snv.counts.allele_fraction() - 0.6) > 1e-12
+        || !snv.molecule_counts_available || snv.counts.alternate_molecules != 3 || snv.counts.reference_molecules != 2
+        || snv.counts.other_molecules != 2
+        || std::abs(snv.counts.molecule_allele_fraction() - 0.6) > 1e-12
         || snv.reads_missing_molecule_tag != 1 || !snv.counts.strand_bias_p_value()) {
         std::cerr << "SNV, strand, or molecule evidence regression\n";
         return EXIT_FAILURE;
@@ -71,8 +74,35 @@ int main() {
     const auto auto_batch = evidence_engine.evaluate(
         {bamseek::VariantQuery{"chr1:15 A>T", "chr1", 14, "A", "T"}}, auto_filters);
     const auto& auto_snv = std::get<bamseek::VariantEvidence>(auto_batch.results.front());
-    if (auto_snv.molecule_counts_available || auto_snv.counts.alternate_molecules != 0) {
-        std::cerr << "Incomplete auto-detected tags must not produce molecule counts\n";
+    if (!auto_snv.molecule_counts_available || auto_snv.counts.alternate_molecules != 3
+        || auto_snv.molecule_tag_used != "read pairs/fragments") {
+        std::cerr << "Auto grouping must fall back to read pairs/fragments\n";
+        return EXIT_FAILURE;
+    }
+
+    const auto paired_batch = evidence_engine.evaluate(
+        {bamseek::VariantQuery{"chr1:75 A>T", "chr1", 74, "A", "T"}}, auto_filters);
+    if (!paired_batch.errors.empty() || paired_batch.results.size() != 1) return EXIT_FAILURE;
+    const auto& paired = std::get<bamseek::VariantEvidence>(paired_batch.results.front());
+    if (paired.counts.reference_reads != 2 || paired.counts.alternate_reads != 3
+        || paired.counts.informative_read_depth() != 5 || std::abs(paired.counts.allele_fraction() - 0.6) > 1e-12
+        || paired.counts.reference_molecules != 1 || paired.counts.alternate_molecules != 2
+        || paired.counts.molecule_depth() != 3
+        || std::abs(paired.counts.molecule_allele_fraction() - (2.0 / 3.0)) > 1e-12) {
+        std::cerr << "Read-pair molecule consensus regression\n";
+        return EXIT_FAILURE;
+    }
+
+    bamseek::EvidenceCounts biallelic_denominator;
+    biallelic_denominator.reference_reads = 6;
+    biallelic_denominator.alternate_reads = 4;
+    biallelic_denominator.other_reads = 90;
+    biallelic_denominator.reference_molecules = 3;
+    biallelic_denominator.alternate_molecules = 2;
+    biallelic_denominator.other_molecules = 45;
+    if (std::abs(biallelic_denominator.allele_fraction() - 0.4) > 1e-12
+        || std::abs(biallelic_denominator.molecule_allele_fraction() - 0.4) > 1e-12) {
+        std::cerr << "OTHER/N observations must be excluded from both VAF denominators\n";
         return EXIT_FAILURE;
     }
 

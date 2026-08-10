@@ -17,6 +17,7 @@ class QTableWidget;
 class QLabel;
 class QTabWidget;
 class QSpinBox;
+class QScrollArea;
 
 namespace bamseek {
 
@@ -67,6 +68,8 @@ private:
     QTableWidget* results_{};
     QTabWidget* tabs_{};
     PileupView* pileup_view_{};
+    QScrollArea* pileup_scroll_{};
+    QLabel* pileup_summary_{};
     QLabel* status_{};
     QPushButton* run_button_{};
     QPushButton* pileup_button_{};
@@ -101,6 +104,7 @@ private:
     QFutureWatcher<MultiBamBatch> watcher_;
     struct PileupLoad {
         PileupData data;
+        QString summary;
         std::string error;
     };
     QFutureWatcher<PileupLoad> pileup_watcher_;

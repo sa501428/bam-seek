@@ -15,6 +15,7 @@ public:
     void set_data(PileupData data);
     void set_group_pairs(bool enabled);
     [[nodiscard]] QSize sizeHint() const override;
+    [[nodiscard]] int variant_x() const noexcept;
 
 protected:
     void paintEvent(QPaintEvent* event) override;

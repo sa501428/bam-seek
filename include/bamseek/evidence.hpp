@@ -51,7 +51,13 @@ struct EvidenceCounts {
     int other_molecules{};
 
     [[nodiscard]] int depth() const noexcept { return reference_reads + alternate_reads + other_reads; }
+    [[nodiscard]] int informative_read_depth() const noexcept { return reference_reads + alternate_reads; }
+    [[nodiscard]] int molecule_depth() const noexcept { return reference_molecules + alternate_molecules; }
+    [[nodiscard]] int total_molecule_depth() const noexcept {
+        return reference_molecules + alternate_molecules + other_molecules;
+    }
     [[nodiscard]] double allele_fraction() const noexcept;
+    [[nodiscard]] double molecule_allele_fraction() const noexcept;
     [[nodiscard]] std::optional<double> strand_bias_p_value() const noexcept;
 };
 
