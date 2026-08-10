@@ -59,6 +59,33 @@ void validate_variant_shape(const VariantQuery& query) {
     }
 }
 
+std::string contig_key(std::string name) {
+    std::transform(name.begin(), name.end(), name.begin(), [](const unsigned char character) {
+        return static_cast<char>(std::tolower(character));
+    });
+    if (name.starts_with("chr")) name.erase(0, 3);
+    if (name == "m") name = "mt";
+    return name;
+}
+
+std::optional<std::string> resolve_contig(
+    const std::vector<igv::SequenceInfo>& sequences,
+    const std::string& requested) {
+    const auto exact = std::find_if(sequences.begin(), sequences.end(), [&](const auto& sequence) {
+        return sequence.name == requested;
+    });
+    if (exact != sequences.end()) return exact->name;
+
+    const auto key = contig_key(requested);
+    std::optional<std::string> match;
+    for (const auto& sequence : sequences) {
+        if (contig_key(sequence.name) != key) continue;
+        if (match) return std::nullopt;  // Do not guess if a header contains ambiguous aliases.
+        match = sequence.name;
+    }
+    return match;
+}
+
 std::unique_ptr<igv::AlignmentReader> open_allowed_alignments(const igv::Resource& resource) {
     if (!allowed_resource_uri(resource.uri) || !allowed_resource_uri(resource.index_uri) || !allowed_resource_uri(resource.reference_uri)) {
         throw std::runtime_error("BAM Seek accepts local paths and HTTPS resources only; HTTP and other URL schemes are not permitted.");
@@ -390,18 +417,24 @@ PileupData EvidenceEngine::pileup(const VariantQuery& query, const FilterSetting
     if (padding < 0 || padding > 1000) throw std::invalid_argument("Pileup padding must be between 0 and 1,000 bases.");
     PileupData data;
     data.query = query;
-    data.interval = query.query_window(padding);
+    const auto alignment_contig = resolve_contig(reader_->sequences(), query.contig);
+    if (!alignment_contig) throw std::invalid_argument("Pileup contig is not present in the alignment header: " + query.contig);
+    data.query.contig = *alignment_contig;
+    data.interval = data.query.query_window(padding);
     data.minimum_base_quality = filters.minimum_base_quality;
     const auto sequence = std::find_if(reader_->sequences().begin(), reader_->sequences().end(), [&](const auto& item) {
-        return item.name == query.contig;
+        return item.name == *alignment_contig;
     });
-    if (sequence == reader_->sequences().end()) throw std::invalid_argument("Pileup contig is not present in the alignment header.");
     if (query.position + static_cast<std::int64_t>(query.reference.size()) > sequence->length) {
         throw std::invalid_argument("Pileup variant is outside the contig bounds.");
     }
     data.interval.end = std::min(data.interval.end, sequence->length);
     if (reference_) {
-        data.reference_bases = reference_->get(data.interval);
+        const auto reference_contig = resolve_contig(reference_->sequences(), query.contig);
+        if (!reference_contig) throw std::invalid_argument("Pileup contig is not present in the configured reference: " + query.contig);
+        auto reference_interval = data.interval;
+        reference_interval.contig = *reference_contig;
+        data.reference_bases = reference_->get(reference_interval);
         data.has_reference = true;
     }
     constexpr std::size_t maximum_display_alignments = 5000;
@@ -419,14 +452,19 @@ BatchEvidence EvidenceEngine::evaluate(const std::vector<Query>& queries, const 
     BatchEvidence batch;
     for (const auto& query : queries) {
         try {
-            const auto* region = std::get_if<RegionQuery>(&query);
-            if (!region) validate_variant_shape(std::get<VariantQuery>(query));
+            auto resolved_query = query;
+            auto* region = std::get_if<RegionQuery>(&resolved_query);
+            if (!region) validate_variant_shape(std::get<VariantQuery>(resolved_query));
             else region->interval.validate();
-            const auto& interval = region ? region->interval : std::get<VariantQuery>(query).query_window(0);
+            const auto requested_contig = region ? region->interval.contig : std::get<VariantQuery>(resolved_query).contig;
+            const auto alignment_contig = resolve_contig(reader_->sequences(), requested_contig);
+            if (!alignment_contig) throw std::runtime_error("contig is not present in the alignment header: " + requested_contig);
+            if (region) region->interval.contig = *alignment_contig;
+            else std::get<VariantQuery>(resolved_query).contig = *alignment_contig;
+            const auto interval = region ? region->interval : std::get<VariantQuery>(resolved_query).query_window(0);
             const auto sequence = std::find_if(reader_->sequences().begin(), reader_->sequences().end(), [&](const auto& item) {
                 return item.name == interval.contig;
             });
-            if (sequence == reader_->sequences().end()) throw std::runtime_error("contig is not present in the alignment header: " + interval.contig);
             if (interval.start < 0 || interval.end > sequence->length) throw std::runtime_error("query is outside the contig bounds");
 
             if (region) {
@@ -438,7 +476,11 @@ BatchEvidence EvidenceEngine::evaluate(const std::vector<Query>& queries, const 
                     batch.results.emplace_back(RegionEvidence{*region, "Region is larger than 100 kb. Split it into smaller windows for targeted scanning.", {}});
                     continue;
                 }
-                const auto reference_bases = reference_->get(region->interval);
+                const auto reference_contig = resolve_contig(reference_->sequences(), requested_contig);
+                if (!reference_contig) throw std::runtime_error("contig is not present in the configured reference: " + requested_contig);
+                auto reference_interval = region->interval;
+                reference_interval.contig = *reference_contig;
+                const auto reference_bases = reference_->get(reference_interval);
                 if (reference_bases.size() != static_cast<std::size_t>(region->interval.end - region->interval.start)) {
                     throw std::runtime_error("reference did not return the complete requested region");
                 }
@@ -463,7 +505,7 @@ BatchEvidence EvidenceEngine::evaluate(const std::vector<Query>& queries, const 
                     for (const auto& [alternate_base, preliminary_count] : observed) {
                         if (preliminary_count < filters.minimum_alternate_reads) continue;
                         auto candidate = evaluate_variant(*reader_, {region->source_text, region->interval.contig, position,
-                                                                      std::string(1, reference_base), std::string(1, alternate_base)}, filters);
+                                                                      std::string(1, reference_base), std::string(1, alternate_base), {}, {}, {}, {}}, filters);
                         if (!candidate.passes_thresholds) continue;
                         if (region_evidence.candidates.size() == maximum_region_candidates) {
                             truncated = true;
@@ -481,9 +523,11 @@ BatchEvidence EvidenceEngine::evaluate(const std::vector<Query>& queries, const 
                 continue;
             }
 
-            const auto& variant = std::get<VariantQuery>(query);
+            const auto& variant = std::get<VariantQuery>(resolved_query);
             if (reference_) {
-                auto observed_reference = reference_->get({variant.contig, variant.position,
+                const auto reference_contig = resolve_contig(reference_->sequences(), requested_contig);
+                if (!reference_contig) throw std::runtime_error("contig is not present in the configured reference: " + requested_contig);
+                auto observed_reference = reference_->get({*reference_contig, variant.position,
                     variant.position + static_cast<std::int64_t>(variant.reference.size())});
                 std::transform(observed_reference.begin(), observed_reference.end(), observed_reference.begin(), [](unsigned char base) {
                     return static_cast<char>(std::toupper(base));

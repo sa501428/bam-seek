@@ -1,6 +1,7 @@
 #include <bamseek/evidence.hpp>
 
 #include <cstdlib>
+#include <cmath>
 #include <iostream>
 
 int main() {
@@ -112,6 +113,51 @@ int main() {
     if (!rejected_invalid_filters) {
         std::cerr << "Invalid filter ranges must be rejected\n";
         return EXIT_FAILURE;
+    }
+
+    struct Jak2Fixture {
+        const char* path;
+        int depth;
+        int alternate_reads;
+        double vaf;
+        const char* header_contig;
+    };
+    const Jak2Fixture jak2_fixtures[]{
+        {BAM_SEEK_JAK2_NEGATIVE_BAM, 120, 0, 0.0, "chr9"},
+        {BAM_SEEK_JAK2_25PCT_BAM, 150, 38, 38.0 / 150.0, "chr9"},
+        {BAM_SEEK_JAK2_28PCT_BAM, 180, 50, 50.0 / 180.0, "9"},
+    };
+    bamseek::FilterSettings jak2_filters;
+    jak2_filters.minimum_mapping_quality = 20;
+    jak2_filters.minimum_base_quality = 20;
+    jak2_filters.minimum_variant_allele_fraction = 0.05;
+    jak2_filters.molecule_mode = bamseek::MoleculeMode::auto_detect;
+    const bamseek::VariantQuery jak2_v617f{
+        "JAK2 c.1849G>T p.V617F chr9:5073770 G>T", "chr9", 5073769, "G", "T",
+        "JAK2", "NM_004972.4", "c.1849G>T", "p.V617F"};
+    for (const auto& fixture : jak2_fixtures) {
+        bamseek::EvidenceEngine jak2_engine({.uri = fixture.path});
+        const auto result = jak2_engine.evaluate({jak2_v617f}, jak2_filters);
+        if (!result.errors.empty() || result.results.size() != 1) {
+            std::cerr << "JAK2 fixture could not be evaluated: " << fixture.path << '\n';
+            return EXIT_FAILURE;
+        }
+        const auto& observed = std::get<bamseek::VariantEvidence>(result.results.front());
+        if (observed.counts.depth() != fixture.depth || observed.counts.alternate_reads != fixture.alternate_reads
+            || std::abs(observed.counts.allele_fraction() - fixture.vaf) > 1e-12
+            || !observed.molecule_counts_available || observed.counts.alternate_molecules != fixture.alternate_reads
+            || observed.passes_thresholds != (fixture.alternate_reads > 0)) {
+            std::cerr << "Incorrect JAK2 evidence for " << fixture.path << ": depth=" << observed.counts.depth()
+                      << " alt=" << observed.counts.alternate_reads << " VAF=" << observed.counts.allele_fraction()
+                      << " alt molecules=" << observed.counts.alternate_molecules << '\n';
+            return EXIT_FAILURE;
+        }
+        const auto jak2_pileup = jak2_engine.pileup(jak2_v617f, jak2_filters, 0);
+        if (jak2_pileup.total_alignments != static_cast<std::size_t>(fixture.depth)
+            || jak2_pileup.query.contig != fixture.header_contig) {
+            std::cerr << "Incorrect aliased JAK2 pileup for " << fixture.path << '\n';
+            return EXIT_FAILURE;
+        }
     }
     return EXIT_SUCCESS;
 }

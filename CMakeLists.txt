@@ -34,23 +34,38 @@ if(BAM_SEEK_ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "AppleClang|Clan
 endif()
 
 if(BAM_SEEK_BUILD_GUI)
-    find_package(Qt6 6.5 REQUIRED COMPONENTS Concurrent Widgets)
+    find_package(Qt6 6.5 REQUIRED COMPONENTS Concurrent Network Widgets)
     qt_standard_project_setup()
     qt_add_executable(bam-seek
         src/main.cpp
+        src/igv_command_receiver.cpp
         src/main_window.cpp
         src/pileup_view.cpp
+        include/bamseek/igv_command_receiver.hpp
         include/bamseek/main_window.hpp
         include/bamseek/pileup_view.hpp
     )
-    target_link_libraries(bam-seek PRIVATE bamseek::core Qt6::Concurrent Qt6::Widgets)
+    target_link_libraries(bam-seek PRIVATE bamseek::core Qt6::Concurrent Qt6::Network Qt6::Widgets)
     target_compile_definitions(bam-seek PRIVATE BAM_SEEK_VERSION="${PROJECT_VERSION}")
     set_target_properties(bam-seek PROPERTIES MACOSX_BUNDLE TRUE WIN32_EXECUTABLE TRUE)
+
+    if(BUILD_TESTING)
+        add_executable(bam_seek_receiver_tests
+            tests/test_igv_command_receiver.cpp
+            src/igv_command_receiver.cpp
+            include/bamseek/igv_command_receiver.hpp
+        )
+        target_include_directories(bam_seek_receiver_tests PRIVATE include)
+        target_link_libraries(bam_seek_receiver_tests PRIVATE Qt6::Core Qt6::Network)
+        add_test(NAME bam_seek_receiver_tests COMMAND bam_seek_receiver_tests)
+    endif()
 endif()
 
 if(BUILD_TESTING)
     add_executable(bam_seek_tests tests/test_query_parser.cpp)
     target_link_libraries(bam_seek_tests PRIVATE bamseek::core)
+    target_compile_definitions(bam_seek_tests PRIVATE
+        BAM_SEEK_CLINICAL_MAPPING="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/clinical_mappings.tsv")
     add_test(NAME bam_seek_tests COMMAND bam_seek_tests)
 
     find_program(SAMTOOLS_EXECUTABLE samtools)
@@ -80,6 +95,9 @@ if(BUILD_TESTING)
             BAM_SEEK_TEST_REFERENCE="${IGVCPP_SOURCE_DIR}/tests/data/reference.fa"
             BAM_SEEK_EVIDENCE_BAM="${BAM_SEEK_TEST_DATA}/evidence.bam"
             BAM_SEEK_EVIDENCE_REFERENCE="${BAM_SEEK_TEST_DATA}/evidence_reference.fa"
+            BAM_SEEK_JAK2_NEGATIVE_BAM="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/jak2/jak2_negative_120x.bam"
+            BAM_SEEK_JAK2_25PCT_BAM="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/jak2/jak2_v617f_25pct_150x.bam"
+            BAM_SEEK_JAK2_28PCT_BAM="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/jak2/jak2_v617f_28pct_180x.bam"
         )
         target_link_libraries(bam_seek_evidence_tests PRIVATE bamseek::core)
         add_test(NAME bam_seek_evidence_tests COMMAND bam_seek_evidence_tests)
