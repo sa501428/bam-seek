@@ -6,20 +6,16 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
-#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDragEnterEvent>
-#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFontDatabase>
+#include <QFrame>
 #include <QFuture>
-#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QIntValidator>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -27,12 +23,14 @@
 #include <QMimeData>
 #include <QPlainTextEdit>
 #include <QPushButton>
-#include <QSaveFile>
+#include <QSettings>
+#include <QSize>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTabBar>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -40,6 +38,7 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <utility>
 
 namespace bamseek {
 namespace {
@@ -55,7 +54,7 @@ QString display_query(const VariantQuery& query) {
         clinical += QString::fromStdString(query.coding_change);
     }
     if (!query.protein_change.empty()) clinical += ' ' + QString::fromStdString(query.protein_change);
-    return clinical + " | " + genomic;
+    return clinical + "  ·  " + genomic;
 }
 
 QString sanitized_resource_uri(const QString& path) {
@@ -117,14 +116,10 @@ QString percent(const double fraction) {
 
 QString evidence_summary(const VariantEvidence& evidence, const QString& bam_label) {
     const auto& counts = evidence.counts;
-    const auto query = display_query(evidence.query);
-    const auto molecule_vaf = evidence.molecule_counts_available
-        ? percent(counts.molecule_allele_fraction())
-        : QString("unavailable");
     return QString("In %1, %2 was supported by %3 of %4 informative reads (VAF %5; %6 REF and %7 OTHER/N reads). "
                    "After collapsing reads with the same read name into paired fragments, %8 of %9 informative molecules supported the variant "
                    "(molecule VAF %10; %11 ambiguous fragments). ALT support included %12 forward and %13 reverse reads.")
-        .arg(bam_label, query)
+        .arg(bam_label, display_query(evidence.query))
         .arg(counts.alternate_reads)
         .arg(counts.informative_read_depth())
         .arg(percent(counts.allele_fraction()))
@@ -132,31 +127,180 @@ QString evidence_summary(const VariantEvidence& evidence, const QString& bam_lab
         .arg(counts.other_reads)
         .arg(evidence.molecule_counts_available ? QString::number(counts.alternate_molecules) : "N/A")
         .arg(evidence.molecule_counts_available ? QString::number(counts.molecule_depth()) : "N/A")
-        .arg(molecule_vaf)
+        .arg(evidence.molecule_counts_available ? percent(counts.molecule_allele_fraction()) : "unavailable")
         .arg(evidence.molecule_counts_available ? QString::number(counts.other_molecules) : "N/A")
         .arg(counts.alternate_forward_reads)
         .arg(counts.alternate_reverse_reads);
 }
 
-QJsonObject file_identity(const QString& path) {
-    if (path.startsWith("https://")) {
-        return QJsonObject{{"uri", sanitized_resource_uri(path)}, {"remote", true}, {"sha256", QJsonValue::Null}};
-    }
-    QFileInfo info(path);
-    QJsonObject identity{{"path", path}, {"exists", info.exists()}};
-    if (!info.exists() || !info.isFile()) return identity;
-    const auto original_size = info.size();
-    const auto original_modified = info.lastModified();
-    identity["bytes"] = static_cast<qint64>(original_size);
-    identity["modified_utc"] = original_modified.toUTC().toString(Qt::ISODateWithMs);
-    QFile input(path);
-    if (!input.open(QIODevice::ReadOnly)) return identity;
-    QCryptographicHash digest(QCryptographicHash::Sha256);
-    while (!input.atEnd()) digest.addData(input.read(4 * 1024 * 1024));
-    identity["sha256"] = QString::fromLatin1(digest.result().toHex());
-    const QFileInfo after(path);
-    identity["stable_during_hash"] = after.size() == original_size && after.lastModified() == original_modified;
-    return identity;
+QLabel* section_title(const QString& text, QWidget* parent) {
+    auto* label = new QLabel(text, parent);
+    label->setObjectName("SectionTitle");
+    return label;
+}
+
+QLabel* muted_label(const QString& text, QWidget* parent) {
+    auto* label = new QLabel(text, parent);
+    label->setObjectName("MutedLabel");
+    label->setWordWrap(true);
+    return label;
+}
+
+QString premium_style(const bool dark) {
+    QString style = R"QSS(
+QMainWindow, QWidget#AppRoot {
+    background: @BG@;
+    color: @TEXT@;
+}
+QWidget {
+    font-size: 13px;
+    color: @TEXT@;
+}
+QTabWidget#WorkspaceTabs::pane {
+    border: 0;
+    background: @BG@;
+}
+QTabWidget#WorkspaceTabs QTabBar::tab {
+    background: transparent;
+    color: @MUTED@;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    padding: 13px 24px;
+    margin-right: 4px;
+    font-weight: 600;
+}
+QTabWidget#WorkspaceTabs QTabBar::tab:selected {
+    color: @TAB_SELECTED@;
+    border-bottom: 2px solid #7c6cff;
+}
+QTabWidget#WorkspaceTabs QTabBar::tab:hover { color: @TAB_HOVER@; }
+QFrame#Card {
+    background: @CARD@;
+    border: 1px solid @BORDER@;
+    border-radius: 14px;
+}
+QLabel#SectionTitle { font-size: 16px; font-weight: 650; color: @TAB_SELECTED@; }
+QLabel#MutedLabel { color: @MUTED@; }
+QLabel#Pill {
+    color: @PILL_TEXT@;
+    background: @PILL_BG@;
+    border: 1px solid @PILL_BORDER@;
+    border-radius: 10px;
+    padding: 3px 10px;
+    font-weight: 600;
+}
+QPlainTextEdit, QLineEdit, QListWidget, QTableWidget, QSpinBox {
+    background: @FIELD@;
+    color: @TEXT@;
+    border: 1px solid @FIELD_BORDER@;
+    border-radius: 9px;
+    selection-background-color: @SELECT@;
+    selection-color: @SELECT_TEXT@;
+}
+QPlainTextEdit, QLineEdit, QListWidget { padding: 8px; }
+QPlainTextEdit:focus, QLineEdit:focus, QListWidget:focus, QTableWidget:focus, QSpinBox:focus {
+    border: 1px solid #796cff;
+}
+QPlainTextEdit#SummaryBox {
+    background: @SUMMARY@;
+    border: 1px solid @SUMMARY_BORDER@;
+    padding: 12px;
+}
+QListWidget::item { border-radius: 7px; padding: 6px; margin: 2px 0; }
+QListWidget::item:selected { background: @LIST_SELECTED@; color: @SELECT_TEXT@; }
+QPushButton {
+    background: @BUTTON@;
+    color: @BUTTON_TEXT@;
+    border: 1px solid @BUTTON_BORDER@;
+    border-radius: 9px;
+    padding: 8px 14px;
+    font-weight: 600;
+}
+QPushButton:hover { background: @BUTTON_HOVER@; border-color: @BUTTON_HOVER_BORDER@; }
+QPushButton:pressed { background: @BUTTON_PRESSED@; }
+QPushButton:disabled { color: @DISABLED_TEXT@; background: @DISABLED_BG@; border-color: @DISABLED_BORDER@; }
+QPushButton#PrimaryButton {
+    color: #ffffff;
+    background: #6f5cf6;
+    border: 1px solid #8575ff;
+    padding: 10px 20px;
+}
+QPushButton#PrimaryButton:hover { background: #7d6bff; }
+QPushButton#PrimaryButton:disabled {
+    color: @DISABLED_TEXT@;
+    background: @DISABLED_BG@;
+    border-color: @DISABLED_BORDER@;
+}
+QPushButton#DangerButton { color: @DANGER@; }
+QPushButton#DangerButton:disabled {
+    color: @DISABLED_TEXT@;
+    background: @DISABLED_BG@;
+    border-color: @DISABLED_BORDER@;
+}
+QPushButton#ThemeButton { padding: 5px 11px; margin: 5px 2px 5px 8px; }
+QHeaderView::section {
+    background: @HEADER@;
+    color: @HEADER_TEXT@;
+    border: 0;
+    border-bottom: 1px solid @HEADER_BORDER@;
+    padding: 9px 8px;
+    font-weight: 600;
+}
+QTableWidget {
+    gridline-color: @HEADER_BORDER@;
+    alternate-background-color: @ALT_ROW@;
+}
+QTableWidget::item { padding: 6px; }
+QTableWidget::item:selected { background: @TABLE_SELECT@; color: @SELECT_TEXT@; }
+QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
+QScrollBar::handle:vertical { background: @SCROLL@; border-radius: 5px; min-height: 28px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QSplitter::handle { background: transparent; width: 10px; height: 10px; }
+QCheckBox { spacing: 8px; color: @CHECK_TEXT@; }
+QCheckBox::indicator { width: 16px; height: 16px; }
+QToolTip { color: @TOOLTIP_TEXT@; background: @TOOLTIP_BG@; border: 1px solid @TOOLTIP_BORDER@; padding: 5px; }
+)QSS";
+    const auto replace = [&style](const char* token, const char* dark_color, const char* light_color, const bool use_dark) {
+        style.replace(token, use_dark ? dark_color : light_color);
+    };
+    replace("@BG@", "#0a0e16", "#f4f6fa", dark);
+    replace("@TEXT@", "#e8edf6", "#172033", dark);
+    replace("@MUTED@", "#8f9bb0", "#667085", dark);
+    replace("@TAB_SELECTED@", "#f4f7fb", "#172033", dark);
+    replace("@TAB_HOVER@", "#cfd7e6", "#344054", dark);
+    replace("@CARD@", "#111824", "#ffffff", dark);
+    replace("@BORDER@", "#222d3d", "#d9e0ea", dark);
+    replace("@PILL_TEXT@", "#b9afff", "#5b48d6", dark);
+    replace("@PILL_BG@", "#211d43", "#eeebff", dark);
+    replace("@PILL_BORDER@", "#39316d", "#d5ceff", dark);
+    replace("@FIELD@", "#0c121c", "#f8fafc", dark);
+    replace("@FIELD_BORDER@", "#273244", "#ccd5e1", dark);
+    replace("@SELECT@", "#5146a8", "#dcd8ff", dark);
+    replace("@SELECT_TEXT@", "#ffffff", "#172033", dark);
+    replace("@SUMMARY@", "#0e1521", "#fbfcfe", dark);
+    replace("@SUMMARY_BORDER@", "#313d52", "#d6dee9", dark);
+    replace("@LIST_SELECTED@", "#242d47", "#e9e6ff", dark);
+    replace("@BUTTON@", "#1a2331", "#ffffff", dark);
+    replace("@BUTTON_TEXT@", "#dce3ef", "#344054", dark);
+    replace("@BUTTON_BORDER@", "#303c4f", "#cfd7e3", dark);
+    replace("@BUTTON_HOVER@", "#222d3d", "#f5f7fb", dark);
+    replace("@BUTTON_HOVER_BORDER@", "#46546b", "#aeb9c8", dark);
+    replace("@BUTTON_PRESSED@", "#151d29", "#e9edf3", dark);
+    replace("@DISABLED_TEXT@", "#586477", "#98a2b3", dark);
+    replace("@DISABLED_BG@", "#111722", "#f1f3f6", dark);
+    replace("@DISABLED_BORDER@", "#202938", "#e1e5eb", dark);
+    replace("@DANGER@", "#f1a5ad", "#c24155", dark);
+    replace("@HEADER@", "#151e2b", "#f2f5f9", dark);
+    replace("@HEADER_TEXT@", "#9eabc0", "#667085", dark);
+    replace("@HEADER_BORDER@", "#2a3547", "#dce2eb", dark);
+    replace("@ALT_ROW@", "#0f1621", "#fafbfc", dark);
+    replace("@TABLE_SELECT@", "#262e52", "#e9e6ff", dark);
+    replace("@SCROLL@", "#344055", "#c3cad5", dark);
+    replace("@CHECK_TEXT@", "#cbd3e1", "#344054", dark);
+    replace("@TOOLTIP_TEXT@", "#edf2fa", "#ffffff", dark);
+    replace("@TOOLTIP_BG@", "#17202d", "#172033", dark);
+    replace("@TOOLTIP_BORDER@", "#354156", "#344054", dark);
+    return style;
 }
 
 }  // namespace
@@ -164,145 +308,202 @@ QJsonObject file_identity(const QString& path) {
 MainWindow::MainWindow() {
     setWindowTitle("BAM Seek — variant allele frequency");
     setAcceptDrops(true);
-    resize(1220, 820);
+    resize(1320, 900);
+    setMinimumSize(1040, 720);
+    setFont(QFontDatabase::systemFont(QFontDatabase::GeneralFont));
+    dark_mode_ = QSettings().value("appearance/dark_mode", true).toBool();
+    setStyleSheet(premium_style(dark_mode_));
 
     auto* root = new QWidget(this);
-    auto* layout = new QVBoxLayout(root);
-
-    auto* bam_group = new QGroupBox("1. Add BAMs", root);
-    auto* bam_group_layout = new QVBoxLayout(bam_group);
-    auto* bam_row = new QHBoxLayout();
-    bam_path_ = new QPlainTextEdit(bam_group);
-    bam_path_->setPlaceholderText("One local path or HTTPS BAM URL per line, or drag local BAMs here");
-    bam_path_->setMaximumHeight(62);
-    auto* browse_bam = new QPushButton("Choose BAMs…", bam_group);
-    load_bams_button_ = new QPushButton("Add to analysis", bam_group);
-    bam_row->addWidget(bam_path_, 1);
-    bam_row->addWidget(browse_bam);
-    bam_row->addWidget(load_bams_button_);
-    bam_group_layout->addLayout(bam_row);
-    auto* loaded_row = new QHBoxLayout();
-    loaded_bams_ = new QListWidget(bam_group);
-    loaded_bams_->setMaximumHeight(82);
-    loaded_bams_->setAlternatingRowColors(true);
-    loaded_bams_->setSelectionMode(QAbstractItemView::NoSelection);
-    clear_bams_button_ = new QPushButton("Clear BAMs", bam_group);
-    clear_bams_button_->setEnabled(false);
-    loaded_row->addWidget(loaded_bams_, 1);
-    loaded_row->addWidget(clear_bams_button_, 0, Qt::AlignTop);
-    bam_group_layout->addLayout(loaded_row);
-    layout->addWidget(bam_group);
-
-    auto* query_group = new QGroupBox("2. Enter variants", root);
-    auto* query_layout = new QVBoxLayout(query_group);
-    query_text_ = new QPlainTextEdit(query_group);
-    query_text_->setPlaceholderText("One variant per line");
-    query_text_->setPlainText(
-        "# Accepted examples (one-based coordinates)\n"
-        "# chr7:140453136 A>T\n"
-        "# chr7:g.140453136A>T\n"
-        "# chr7 140453136 A T\n"
-        "# chr7 140453136 . A T\n"
-        "# BRAF c.1799T>A p.V600E chr7:140453136 A>T");
-    query_text_->setMaximumHeight(150);
-    query_layout->addWidget(query_text_);
-    auto* filter_row = new QHBoxLayout();
-    minimum_mapq_ = new QLineEdit("20", query_group);
-    minimum_baseq_ = new QLineEdit("20", query_group);
-    minimum_mapq_->setMaximumWidth(60);
-    minimum_baseq_->setMaximumWidth(60);
-    minimum_mapq_->setValidator(new QIntValidator(0, 255, minimum_mapq_));
-    minimum_baseq_->setValidator(new QIntValidator(0, 255, minimum_baseq_));
-    filter_row->addWidget(new QLabel("Minimum mapQ", query_group));
-    filter_row->addWidget(minimum_mapq_);
-    filter_row->addSpacing(16);
-    filter_row->addWidget(new QLabel("Minimum baseQ", query_group));
-    filter_row->addWidget(minimum_baseq_);
-    filter_row->addStretch(1);
-    filter_row->addWidget(new QLabel("Molecules are paired fragments grouped by read name (no UMI).", query_group));
-    query_layout->addLayout(filter_row);
-    layout->addWidget(query_group);
-
-    auto* action_row = new QHBoxLayout();
-    run_button_ = new QPushButton("Calculate VAFs", root);
-    export_button_ = new QPushButton("Export audit JSON…", root);
-    status_ = new QLabel("Add one or more BAMs, enter variants, then calculate VAFs.", root);
-    action_row->addWidget(run_button_);
-    action_row->addWidget(export_button_);
-    action_row->addWidget(status_, 1);
-    layout->addLayout(action_row);
+    root->setObjectName("AppRoot");
+    auto* root_layout = new QVBoxLayout(root);
+    root_layout->setContentsMargins(20, 14, 20, 18);
+    root_layout->setSpacing(0);
 
     tabs_ = new QTabWidget(root);
-    auto* results_tab = new QWidget(tabs_);
-    auto* results_layout = new QVBoxLayout(results_tab);
-    results_layout->setContentsMargins(0, 0, 0, 0);
-    auto* splitter = new QSplitter(Qt::Vertical, results_tab);
-    results_ = new QTableWidget(splitter);
-    results_->setColumnCount(12);
-    results_->setHorizontalHeaderLabels({"BAM", "Variant", "Observed", "ALT reads", "Read depth", "VAF",
-        "ALT molecules", "Molecule depth", "Molecule VAF", "OTHER/N reads", "Ambiguous molecules", "Summary"});
+    tabs_->setObjectName("WorkspaceTabs");
+    tabs_->setDocumentMode(true);
+    tabs_->tabBar()->setDrawBase(false);
+    theme_button_ = new QPushButton(tabs_);
+    theme_button_->setObjectName("ThemeButton");
+    tabs_->setCornerWidget(theme_button_, Qt::TopRightCorner);
+    apply_theme();
+
+    auto* analysis_page = new QWidget(tabs_);
+    auto* analysis_layout = new QVBoxLayout(analysis_page);
+    analysis_layout->setContentsMargins(4, 14, 4, 4);
+    analysis_layout->setSpacing(14);
+
+    auto* input_splitter = new QSplitter(Qt::Horizontal, analysis_page);
+    input_splitter->setChildrenCollapsible(false);
+
+    auto* bam_card = new QFrame(input_splitter);
+    bam_card->setObjectName("Card");
+    auto* bam_layout = new QVBoxLayout(bam_card);
+    bam_layout->setContentsMargins(18, 16, 18, 18);
+    bam_layout->setSpacing(11);
+    auto* bam_header = new QHBoxLayout();
+    bam_header->addWidget(section_title("BAM sources", bam_card));
+    bam_header->addStretch(1);
+    bam_count_ = new QLabel("0 ready", bam_card);
+    bam_count_->setObjectName("Pill");
+    bam_header->addWidget(bam_count_);
+    bam_layout->addLayout(bam_header);
+    bam_path_ = new QPlainTextEdit(bam_card);
+    bam_path_->setPlaceholderText("/data/sample.bam\nhttps://example.org/sample.bam");
+    bam_path_->setMaximumHeight(72);
+    bam_layout->addWidget(bam_path_);
+    auto* bam_add_row = new QHBoxLayout();
+    auto* browse_bam = new QPushButton("Choose files…", bam_card);
+    load_bams_button_ = new QPushButton("Add BAMs", bam_card);
+    load_bams_button_->setObjectName("PrimaryButton");
+    bam_add_row->addWidget(browse_bam);
+    bam_add_row->addStretch(1);
+    bam_add_row->addWidget(load_bams_button_);
+    bam_layout->addLayout(bam_add_row);
+    auto* bam_manage_row = new QHBoxLayout();
+    bam_manage_row->addWidget(muted_label("Prepared BAMs", bam_card));
+    bam_manage_row->addStretch(1);
+    remove_bams_button_ = new QPushButton("Remove", bam_card);
+    remove_bams_button_->setEnabled(false);
+    clear_bams_button_ = new QPushButton("Clear", bam_card);
+    clear_bams_button_->setObjectName("DangerButton");
+    clear_bams_button_->setEnabled(false);
+    bam_manage_row->addWidget(remove_bams_button_);
+    bam_manage_row->addWidget(clear_bams_button_);
+    bam_layout->addLayout(bam_manage_row);
+    loaded_bams_ = new QListWidget(bam_card);
+    loaded_bams_->setAlternatingRowColors(false);
+    loaded_bams_->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    loaded_bams_->setMinimumHeight(105);
+    loaded_bams_->setToolTip("Prepared BAMs are reused when VAF calculation is requested.");
+    bam_layout->addWidget(loaded_bams_, 1);
+
+    auto* variant_card = new QFrame(input_splitter);
+    variant_card->setObjectName("Card");
+    auto* variant_layout = new QVBoxLayout(variant_card);
+    variant_layout->setContentsMargins(18, 16, 18, 18);
+    variant_layout->setSpacing(11);
+    variant_layout->addWidget(section_title("Variants", variant_card));
+    query_text_ = new QPlainTextEdit(variant_card);
+    query_text_->setPlaceholderText(
+        "chr7:140453136 A>T\n"
+        "chr7:g.140453136A>T\n"
+        "BRAF c.1799T>A p.V600E chr7:140453136 A>T");
+    variant_layout->addWidget(query_text_, 1);
+    auto* filter_row = new QHBoxLayout();
+    filter_row->addWidget(muted_label("mapQ ≥", variant_card));
+    minimum_mapq_ = new QLineEdit("20", variant_card);
+    minimum_mapq_->setMaximumWidth(58);
+    minimum_mapq_->setAlignment(Qt::AlignCenter);
+    minimum_mapq_->setValidator(new QIntValidator(0, 255, minimum_mapq_));
+    filter_row->addWidget(minimum_mapq_);
+    filter_row->addSpacing(12);
+    filter_row->addWidget(muted_label("baseQ ≥", variant_card));
+    minimum_baseq_ = new QLineEdit("20", variant_card);
+    minimum_baseq_->setMaximumWidth(58);
+    minimum_baseq_->setAlignment(Qt::AlignCenter);
+    minimum_baseq_->setValidator(new QIntValidator(0, 255, minimum_baseq_));
+    filter_row->addWidget(minimum_baseq_);
+    filter_row->addStretch(1);
+    variant_layout->addLayout(filter_row);
+
+    input_splitter->addWidget(bam_card);
+    input_splitter->addWidget(variant_card);
+    input_splitter->setSizes({580, 700});
+    analysis_layout->addWidget(input_splitter, 1);
+
+    auto* action_row = new QHBoxLayout();
+    status_ = new QLabel("Add BAMs and variants to begin.", analysis_page);
+    status_->setObjectName("MutedLabel");
+    run_button_ = new QPushButton("Calculate VAFs", analysis_page);
+    run_button_->setObjectName("PrimaryButton");
+    run_button_->setEnabled(false);
+    action_row->addWidget(status_, 1);
+    action_row->addWidget(run_button_);
+    analysis_layout->addLayout(action_row);
+
+    auto* results_card = new QFrame(analysis_page);
+    results_card->setObjectName("Card");
+    auto* results_layout = new QVBoxLayout(results_card);
+    results_layout->setContentsMargins(16, 14, 16, 16);
+    results_layout->setSpacing(10);
+    results_layout->addWidget(section_title("VAF results", results_card));
+    results_ = new QTableWidget(results_card);
+    results_->setColumnCount(11);
+    results_->setHorizontalHeaderLabels({"BAM", "Variant", "ALT reads", "Read depth", "VAF",
+        "ALT molecules", "Molecule depth", "Molecule VAF", "OTHER/N", "Ambiguous", "ALT F / R"});
+    results_->setAlternatingRowColors(true);
     results_->setSelectionBehavior(QAbstractItemView::SelectRows);
     results_->setSelectionMode(QAbstractItemView::SingleSelection);
     results_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    results_->horizontalHeader()->setStretchLastSection(true);
+    results_->setShowGrid(false);
     results_->verticalHeader()->setVisible(false);
-
-    auto* details = new QWidget(splitter);
-    auto* details_layout = new QVBoxLayout(details);
-    details_layout->setContentsMargins(0, 0, 0, 0);
-    auto* summary_row = new QHBoxLayout();
-    summary_row->addWidget(new QLabel("Copyable result summary", details));
-    summary_row->addStretch(1);
-    copy_summary_button_ = new QPushButton("Copy summary", details);
+    results_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    results_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    results_->setMinimumHeight(175);
+    results_layout->addWidget(results_, 1);
+    auto* summary_header = new QHBoxLayout();
+    summary_header->addWidget(muted_label("Summary", results_card));
+    summary_header->addStretch(1);
+    copy_summary_button_ = new QPushButton("Copy summary", results_card);
     copy_summary_button_->setEnabled(false);
-    summary_row->addWidget(copy_summary_button_);
-    details_layout->addLayout(summary_row);
-    summary_text_ = new QPlainTextEdit(details);
+    summary_header->addWidget(copy_summary_button_);
+    results_layout->addLayout(summary_header);
+    summary_text_ = new QPlainTextEdit(results_card);
+    summary_text_->setObjectName("SummaryBox");
     summary_text_->setReadOnly(true);
-    summary_text_->setMaximumHeight(88);
-    summary_text_->setPlaceholderText("Select a result to create a concise summary paragraph.");
-    details_layout->addWidget(summary_text_);
-    read_details_ = new QPlainTextEdit(details);
-    read_details_->setReadOnly(true);
-    read_details_->setPlaceholderText("Per-read evidence for the selected result appears here.");
-    details_layout->addWidget(read_details_);
-    splitter->addWidget(results_);
-    splitter->addWidget(details);
-    splitter->setSizes({360, 230});
-    results_layout->addWidget(splitter);
-    tabs_->addTab(results_tab, "VAF results");
+    summary_text_->setMaximumHeight(90);
+    summary_text_->setPlaceholderText("Select a result to generate a copy-ready paragraph.");
+    results_layout->addWidget(summary_text_);
+    analysis_layout->addWidget(results_card, 2);
 
-    auto* broadcast_tab = new QWidget(tabs_);
-    auto* broadcast_layout = new QVBoxLayout(broadcast_tab);
+    auto* broadcast_page = new QWidget(tabs_);
+    auto* broadcast_layout = new QVBoxLayout(broadcast_page);
+    broadcast_layout->setContentsMargins(4, 14, 4, 4);
+    auto* receiver_card = new QFrame(broadcast_page);
+    receiver_card->setObjectName("Card");
+    auto* receiver_layout = new QVBoxLayout(receiver_card);
+    receiver_layout->setContentsMargins(18, 16, 18, 18);
     auto* receiver_controls = new QHBoxLayout();
-    receiver_enabled_ = new QCheckBox("Listen for IGV commands", broadcast_tab);
+    receiver_enabled_ = new QCheckBox("Receiver enabled", receiver_card);
     receiver_enabled_->setChecked(true);
-    receiver_port_ = new QSpinBox(broadcast_tab);
+    receiver_port_ = new QSpinBox(receiver_card);
     receiver_port_->setRange(1024, 65535);
     receiver_port_->setValue(60151);
-    receiver_port_->setToolTip("IGV's default command port is 60151. Only one application can listen on a port at a time.");
-    receiver_status_ = new QLabel(broadcast_tab);
+    receiver_port_->setMaximumWidth(100);
+    receiver_status_ = new QLabel(receiver_card);
+    receiver_status_->setObjectName("MutedLabel");
     receiver_controls->addWidget(receiver_enabled_);
-    receiver_controls->addWidget(new QLabel("Local port", broadcast_tab));
+    receiver_controls->addSpacing(16);
+    receiver_controls->addWidget(muted_label("Port", receiver_card));
     receiver_controls->addWidget(receiver_port_);
+    receiver_controls->addSpacing(16);
     receiver_controls->addWidget(receiver_status_, 1);
-    broadcast_layout->addLayout(receiver_controls);
-    broadcast_text_ = new QPlainTextEdit(broadcast_tab);
-    broadcast_text_->setPlaceholderText("Received IGV /load and /goto information is appended here. The receiver remains passive.");
-    broadcast_layout->addWidget(broadcast_text_);
-    tabs_->addTab(broadcast_tab, "Broadcast inbox");
-    layout->addWidget(tabs_, 1);
+    receiver_layout->addLayout(receiver_controls);
+    broadcast_text_ = new QPlainTextEdit(receiver_card);
+    broadcast_text_->setPlaceholderText("Received /load and /goto commands will appear here…");
+    receiver_layout->addWidget(broadcast_text_, 1);
+    broadcast_layout->addWidget(receiver_card, 1);
+
+    tabs_->addTab(analysis_page, "VAF workspace");
+    tabs_->addTab(broadcast_page, "Broadcast receiver");
+    root_layout->addWidget(tabs_);
     setCentralWidget(root);
 
     connect(browse_bam, &QPushButton::clicked, this, [this] { choose_bams(); });
     connect(load_bams_button_, &QPushButton::clicked, this, [this] { load_bams(); });
+    connect(remove_bams_button_, &QPushButton::clicked, this, [this] { remove_selected_bams(); });
     connect(clear_bams_button_, &QPushButton::clicked, this, [this] { clear_loaded_bams(); });
+    connect(loaded_bams_, &QListWidget::itemSelectionChanged, this, [this] {
+        remove_bams_button_->setEnabled(!busy() && !loaded_bams_->selectedItems().isEmpty());
+    });
     connect(run_button_, &QPushButton::clicked, this, [this] { run_queries(); });
     connect(copy_summary_button_, &QPushButton::clicked, this, [this] { copy_summary(); });
-    connect(export_button_, &QPushButton::clicked, this, [this] { export_audit(); });
-    connect(results_, &QTableWidget::cellClicked, this, [this](const int row, const int column) { show_result_details(row, column); });
+    connect(theme_button_, &QPushButton::clicked, this, [this] { toggle_theme(); });
+    connect(results_, &QTableWidget::cellClicked, this, [this](const int row, const int column) { show_result_summary(row, column); });
+    connect(&bam_load_watcher_, &QFutureWatcher<BamLoadBatch>::finished, this, [this] { bams_loaded(); });
     connect(&watcher_, &QFutureWatcher<MultiBamBatch>::finished, this, [this] { show_results(); });
-    connect(&audit_watcher_, &QFutureWatcher<AuditSave>::finished, this, [this] { audit_saved(); });
 
     command_receiver_ = new IgvCommandReceiver(this);
     connect(receiver_enabled_, &QCheckBox::toggled, this, [this](const bool enabled) { set_receiver_enabled(enabled); });
@@ -314,10 +515,39 @@ MainWindow::MainWindow() {
     });
     connect(command_receiver_, &IgvCommandReceiver::listening_changed, this,
         [this](const bool listening, const quint16 port, const QString& error) {
-            receiver_status_->setText(listening ? QString("Listening passively on 127.0.0.1:%1").arg(port)
-                                                : (error.isEmpty() ? "Receiver stopped" : "Receiver unavailable: " + error));
+            receiver_status_->setText(listening ? QString("Listening on 127.0.0.1:%1").arg(port)
+                                                : (error.isEmpty() ? "Receiver stopped" : "Unavailable · " + error));
         });
     set_receiver_enabled(true);
+}
+
+bool MainWindow::busy() const {
+    return bam_load_watcher_.isRunning() || watcher_.isRunning();
+}
+
+void MainWindow::toggle_theme() {
+    dark_mode_ = !dark_mode_;
+    QSettings().setValue("appearance/dark_mode", dark_mode_);
+    apply_theme();
+}
+
+void MainWindow::apply_theme() {
+    setStyleSheet(premium_style(dark_mode_));
+    if (theme_button_ != nullptr) {
+        theme_button_->setText(dark_mode_ ? "Light" : "Dark");
+        theme_button_->setToolTip(dark_mode_ ? "Switch to light mode" : "Switch to dark mode");
+    }
+    if (loaded_bams_ != nullptr) {
+        const QColor ready_color(dark_mode_ ? "#b7efcf" : "#157347");
+        for (int row = 0; row < loaded_bams_->count(); ++row) loaded_bams_->item(row)->setForeground(ready_color);
+    }
+    if (results_ != nullptr) {
+        const QColor accent(dark_mode_ ? "#b8adff" : "#5b48d6");
+        for (int row = 0; row < results_->rowCount(); ++row) {
+            if (results_->item(row, 4) != nullptr) results_->item(row, 4)->setForeground(accent);
+            if (results_->item(row, 7) != nullptr) results_->item(row, 7)->setForeground(accent);
+        }
+    }
 }
 
 void MainWindow::set_receiver_enabled(const bool enabled) {
@@ -345,10 +575,12 @@ void MainWindow::dropEvent(QDropEvent* event) {
     QStringList bams;
     for (const auto& url : event->mimeData()->urls()) {
         if (url.isLocalFile() && url.toLocalFile().endsWith(".bam", Qt::CaseInsensitive)) bams.append(url.toLocalFile());
+        else if (url.scheme() == "https") bams.append(url.toString());
     }
     if (bams.isEmpty()) return;
     append_resource_lines(bam_path_, bams);
-    status_->setText(QString("%1 BAM path(s) added. Choose Add to analysis.").arg(bams.size()));
+    tabs_->setCurrentIndex(0);
+    status_->setText(QString("%1 BAM source(s) ready to add.").arg(bams.size()));
     event->acceptProposedAction();
 }
 
@@ -358,18 +590,18 @@ void MainWindow::choose_bams() {
 }
 
 void MainWindow::load_bams() {
-    if (watcher_.isRunning() || audit_watcher_.isRunning()) return;
-    const auto pending_bams = nonempty_lines(bam_path_);
-    if (pending_bams.isEmpty()) {
-        QMessageBox::information(this, "No pending BAM", "Type, paste, browse, or drop one or more BAM paths or HTTPS URLs first.");
+    if (busy()) return;
+    const auto pending = nonempty_lines(bam_path_);
+    if (pending.isEmpty()) {
+        QMessageBox::information(this, "No BAM sources", "Add local BAM paths or HTTPS BAM URLs first.");
         return;
     }
 
+    QStringList candidates;
+    QStringList candidate_indexes;
     QStringList issues;
-    int added = 0;
-    for (const auto& bam : pending_bams) {
+    for (const auto& bam : pending) {
         const bool remote = bam.startsWith("https://");
-        const QFileInfo info(bam);
         const QUrl remote_url(bam);
         if ((bam.contains("://") && !remote)
             || (remote && (!remote_url.isValid() || remote_url.host().isEmpty()))
@@ -377,54 +609,128 @@ void MainWindow::load_bams() {
             issues.append(sanitized_resource_uri(bam) + ": expected a local .bam path or valid HTTPS BAM URL.");
             continue;
         }
-        if (!remote && (!info.exists() || !info.isFile())) {
+        if (!remote && (!QFileInfo(bam).exists() || !QFileInfo(bam).isFile())) {
             issues.append(bam + ": BAM file not found.");
             continue;
         }
         const auto index = remote ? QString{} : index_path_for(bam);
         if (!remote && index.isEmpty()) {
-            issues.append(resource_label(bam) + ": no .bai or .csi index was found beside the BAM.");
+            issues.append(resource_label(bam) + ": no adjacent .bai or .csi index was found.");
             continue;
         }
-        if (loaded_bam_paths_.contains(bam)) continue;
-        loaded_bam_paths_.append(bam);
-        loaded_index_paths_.append(index);
-        ++added;
+        if (loaded_bam_paths_.contains(bam) || candidates.contains(bam)) {
+            issues.append(resource_label(bam) + ": already in the BAM panel.");
+            continue;
+        }
+        candidates.append(bam);
+        candidate_indexes.append(index);
     }
+    if (candidates.isEmpty()) {
+        QMessageBox::warning(this, "No BAMs added", issues.join('\n'));
+        return;
+    }
+
+    bam_path_->setEnabled(false);
+    load_bams_button_->setEnabled(false);
+    run_button_->setEnabled(false);
+    remove_bams_button_->setEnabled(false);
+    clear_bams_button_->setEnabled(false);
+    status_->setText(QString("Preparing %1 BAM source(s) in the background…").arg(candidates.size()));
+    bam_load_watcher_.setFuture(QtConcurrent::run([candidates, candidate_indexes, issues = std::move(issues)]() mutable {
+        BamLoadBatch loaded;
+        loaded.issues = std::move(issues);
+        for (qsizetype i = 0; i < candidates.size(); ++i) {
+            const auto bam = candidates[i];
+            const auto index = candidate_indexes[i];
+            try {
+                igv::Resource resource{.uri = bam.toStdString()};
+                if (!index.isEmpty()) resource.index_uri = index.toStdString();
+                auto engine = std::make_shared<EvidenceEngine>(std::move(resource));
+                loaded.bams.append(bam);
+                loaded.indexes.append(index);
+                loaded.engines.push_back(std::move(engine));
+            } catch (const std::exception& error) {
+                loaded.issues.append(resource_label(bam) + ": " + QString::fromStdString(sanitized_error(error.what(), bam)));
+            }
+        }
+        return loaded;
+    }));
+}
+
+void MainWindow::bams_loaded() {
+    const auto loaded = bam_load_watcher_.result();
+    for (qsizetype i = 0; i < loaded.bams.size(); ++i) {
+        loaded_bam_paths_.append(loaded.bams[i]);
+        loaded_index_paths_.append(loaded.indexes[i]);
+        loaded_engines_.push_back(loaded.engines[static_cast<std::size_t>(i)]);
+    }
+    if (!loaded.bams.isEmpty()) {
+        bam_path_->clear();
+        last_batch_ = {};
+        result_bam_paths_.clear();
+        results_->setRowCount(0);
+        summary_text_->clear();
+        copy_summary_button_->setEnabled(false);
+    }
+    bam_path_->setEnabled(true);
+    load_bams_button_->setEnabled(true);
+    run_button_->setEnabled(true);
     refresh_loaded_bams();
-    if (added > 0) bam_path_->clear();
-    status_->setText(QString("%1 BAM(s) active; %2 added. Each BAM will receive a separate VAF result.")
-        .arg(loaded_bam_paths_.size()).arg(added));
-    if (!issues.isEmpty()) QMessageBox::warning(this, "Some BAMs were not added", issues.join('\n'));
+    status_->setText(QString("%1 BAM(s) ready. No VAF calculation has run yet.").arg(loaded_bam_paths_.size()));
+    if (!loaded.issues.isEmpty()) QMessageBox::warning(this, "BAM preparation notes", loaded.issues.join('\n'));
+}
+
+void MainWindow::remove_selected_bams() {
+    if (busy()) return;
+    QList<int> rows;
+    for (auto* item : loaded_bams_->selectedItems()) rows.append(loaded_bams_->row(item));
+    std::sort(rows.begin(), rows.end(), std::greater<>());
+    rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+    for (const int row : rows) {
+        loaded_bam_paths_.removeAt(row);
+        loaded_index_paths_.removeAt(row);
+        loaded_engines_.erase(loaded_engines_.begin() + row);
+    }
+    last_batch_ = {};
+    result_bam_paths_.clear();
+    results_->setRowCount(0);
+    summary_text_->clear();
+    copy_summary_button_->setEnabled(false);
+    refresh_loaded_bams();
+    status_->setText(QString("%1 BAM(s) ready. Results cleared after source changes.").arg(loaded_bam_paths_.size()));
 }
 
 void MainWindow::clear_loaded_bams() {
-    if (watcher_.isRunning() || audit_watcher_.isRunning()) return;
+    if (busy()) return;
     loaded_bam_paths_.clear();
     loaded_index_paths_.clear();
-    configured_bam_paths_.clear();
-    configured_index_paths_.clear();
+    loaded_engines_.clear();
     result_bam_paths_.clear();
     last_batch_ = {};
     results_->setRowCount(0);
     summary_text_->clear();
-    read_details_->clear();
     copy_summary_button_->setEnabled(false);
     refresh_loaded_bams();
-    status_->setText("All BAMs cleared.");
+    status_->setText("BAM panel cleared.");
 }
 
 void MainWindow::refresh_loaded_bams() {
     loaded_bams_->clear();
-    for (qsizetype index = 0; index < loaded_bam_paths_.size(); ++index) {
-        const auto& bam = loaded_bam_paths_[index];
-        const auto& bam_index = loaded_index_paths_[index];
-        const auto index_status = bam_index.isEmpty() ? "remote index: automatic" : "index found automatically";
-        auto* item = new QListWidgetItem(resource_label(bam) + "  —  " + index_status, loaded_bams_);
+    for (qsizetype i = 0; i < loaded_bam_paths_.size(); ++i) {
+        const auto& bam = loaded_bam_paths_[i];
+        const bool remote = bam.startsWith("https://");
+        auto* item = new QListWidgetItem(QString("●  %1\n    %2 · Ready")
+            .arg(resource_label(bam), remote ? "HTTPS" : "Local"), loaded_bams_);
+        item->setForeground(QColor(dark_mode_ ? "#b7efcf" : "#157347"));
+        item->setSizeHint(QSize(0, 48));
         item->setToolTip("BAM: " + sanitized_resource_uri(bam) + "\nIndex: "
-            + (bam_index.isEmpty() ? "automatic remote discovery" : bam_index));
+            + (loaded_index_paths_[i].isEmpty() ? "automatic remote discovery" : loaded_index_paths_[i]));
     }
-    clear_bams_button_->setEnabled(!loaded_bam_paths_.isEmpty() && !watcher_.isRunning());
+    bam_count_->setText(QString("%1 ready").arg(loaded_bam_paths_.size()));
+    const bool has_bams = !loaded_bam_paths_.isEmpty();
+    run_button_->setEnabled(has_bams && !busy());
+    remove_bams_button_->setEnabled(has_bams && !loaded_bams_->selectedItems().isEmpty() && !busy());
+    clear_bams_button_->setEnabled(has_bams && !busy());
 }
 
 FilterSettings MainWindow::filters() const {
@@ -439,14 +745,13 @@ FilterSettings MainWindow::filters() const {
 }
 
 void MainWindow::run_queries() {
-    const auto bams = loaded_bam_paths_;
-    const auto indexes = loaded_index_paths_;
-    if (bams.isEmpty()) {
-        QMessageBox::warning(this, "No active BAM", "Add at least one indexed BAM before calculating VAFs.");
+    if (busy()) return;
+    if (loaded_engines_.empty()) {
+        QMessageBox::warning(this, "No prepared BAMs", "Add at least one BAM to the BAM panel first.");
         return;
     }
     if (!minimum_mapq_->hasAcceptableInput() || !minimum_baseq_->hasAcceptableInput()) {
-        QMessageBox::warning(this, "Invalid read filters", "MapQ and baseQ must be integers from 0 to 255.");
+        QMessageBox::warning(this, "Invalid quality filters", "MapQ and baseQ must be integers from 0 to 255.");
         return;
     }
     auto parsed = parse_queries(query_text_->toPlainText().toStdString());
@@ -454,43 +759,42 @@ void MainWindow::run_queries() {
     variants.reserve(parsed.queries.size());
     for (auto& query : parsed.queries) {
         if (std::holds_alternative<VariantQuery>(query)) variants.push_back(std::move(query));
-        else parsed.errors.push_back(std::get<RegionQuery>(query).source_text + ": region scans are not part of the VAF workflow; enter a specific REF>ALT variant");
+        else parsed.errors.push_back(std::get<RegionQuery>(query).source_text
+            + ": enter a specific REF>ALT variant rather than a region");
     }
     if (variants.empty()) {
-        QMessageBox::warning(this, "No valid variants", QString::fromStdString(parsed.errors.empty() ? "Enter at least one variant." : parsed.errors.front()));
+        QMessageBox::warning(this, "No valid variants", QString::fromStdString(parsed.errors.empty()
+            ? "Enter at least one variant." : parsed.errors.front()));
         return;
     }
 
     last_filters_ = filters();
-    configured_bam_paths_ = bams;
-    configured_index_paths_ = indexes;
-    last_query_text_ = query_text_->toPlainText();
+    const auto bams = loaded_bam_paths_;
+    const auto engines = loaded_engines_;
     run_button_->setEnabled(false);
     load_bams_button_->setEnabled(false);
+    remove_bams_button_->setEnabled(false);
     clear_bams_button_->setEnabled(false);
-    status_->setText(QString("Calculating VAFs in %1 BAM(s)…").arg(bams.size()));
+    status_->setText(QString("Calculating %1 variant(s) across %2 prepared BAM(s)…")
+        .arg(variants.size()).arg(bams.size()));
     watcher_.setFuture(QtConcurrent::run([queries = std::move(variants), errors = std::move(parsed.errors),
-                                          filter_values = last_filters_, bams, indexes] {
+                                          filter_values = last_filters_, bams, engines] {
         MultiBamBatch combined;
         combined.batch.errors = errors;
-        for (qsizetype source_index = 0; source_index < bams.size(); ++source_index) {
-            const auto bam_qt = bams[source_index];
-            const auto index_qt = indexes[source_index];
+        for (std::size_t source_index = 0; source_index < engines.size(); ++source_index) {
+            const auto& bam = bams[static_cast<qsizetype>(source_index)];
             try {
-                igv::Resource resource{.uri = bam_qt.toStdString()};
-                if (!index_qt.isEmpty()) resource.index_uri = index_qt.toStdString();
-                EvidenceEngine engine(std::move(resource));
-                auto evaluated = engine.evaluate(queries, filter_values);
+                auto evaluated = engines[source_index]->evaluate(queries, filter_values);
                 for (auto& result : evaluated.results) {
                     combined.batch.results.push_back(std::move(result));
-                    combined.result_bams.append(bam_qt);
+                    combined.result_bams.append(bam);
                 }
                 for (auto& error : evaluated.errors) {
-                    combined.batch.errors.push_back("[" + resource_label(bam_qt).toStdString() + "] " + error);
+                    combined.batch.errors.push_back("[" + resource_label(bam).toStdString() + "] " + error);
                 }
             } catch (const std::exception& error) {
-                combined.batch.errors.push_back("[" + resource_label(bam_qt).toStdString() + "] "
-                    + sanitized_error(error.what(), bam_qt));
+                combined.batch.errors.push_back("[" + resource_label(bam).toStdString() + "] "
+                    + sanitized_error(error.what(), bam));
             }
         }
         return combined;
@@ -502,151 +806,59 @@ void MainWindow::show_results() {
     last_batch_ = combined.batch;
     result_bam_paths_ = combined.result_bams;
     results_->setRowCount(0);
-    for (int index = 0; index < static_cast<int>(last_batch_.results.size()); ++index) {
-        const auto* evidence = std::get_if<VariantEvidence>(&last_batch_.results[static_cast<std::size_t>(index)]);
+    for (int row = 0; row < static_cast<int>(last_batch_.results.size()); ++row) {
+        const auto* evidence = std::get_if<VariantEvidence>(&last_batch_.results[static_cast<std::size_t>(row)]);
         if (evidence == nullptr) continue;
-        results_->insertRow(index);
+        results_->insertRow(row);
         const auto& count = evidence->counts;
-        const auto bam_label = resource_label(result_bam_paths_[index]);
-        const QList<QString> values{bam_label, display_query(evidence->query), count.alternate_molecules > 0 ? "Yes" : "No",
+        const QList<QString> values{resource_label(result_bam_paths_[row]), display_query(evidence->query),
             QString::number(count.alternate_reads), QString::number(count.informative_read_depth()), percent(count.allele_fraction()),
-            QString::number(count.alternate_molecules), QString::number(count.molecule_depth()), percent(count.molecule_allele_fraction()),
-            QString::number(count.other_reads), QString::number(count.other_molecules), evidence_summary(*evidence, bam_label)};
+            evidence->molecule_counts_available ? QString::number(count.alternate_molecules) : "N/A",
+            evidence->molecule_counts_available ? QString::number(count.molecule_depth()) : "N/A",
+            evidence->molecule_counts_available ? percent(count.molecule_allele_fraction()) : "N/A",
+            QString::number(count.other_reads),
+            evidence->molecule_counts_available ? QString::number(count.other_molecules) : "N/A",
+            QString("%1 / %2").arg(count.alternate_forward_reads).arg(count.alternate_reverse_reads)};
         for (int column = 0; column < values.size(); ++column) {
             auto* item = new QTableWidgetItem(values[column]);
-            if (column == 0) item->setToolTip(sanitized_resource_uri(result_bam_paths_[index]));
-            results_->setItem(index, column, item);
+            item->setTextAlignment(column >= 2 ? Qt::AlignCenter : Qt::AlignVCenter | Qt::AlignLeft);
+            if (column == 0) item->setToolTip(sanitized_resource_uri(result_bam_paths_[row]));
+            if ((column == 4 || column == 7) && count.alternate_reads > 0) {
+                item->setForeground(QColor(dark_mode_ ? "#b8adff" : "#5b48d6"));
+            }
+            results_->setItem(row, column, item);
         }
     }
     run_button_->setEnabled(true);
     load_bams_button_->setEnabled(true);
-    clear_bams_button_->setEnabled(!loaded_bam_paths_.isEmpty());
-    status_->setText(QString("%1 VAF result(s) from %2 BAM(s); %3 issue(s).")
-        .arg(last_batch_.results.size()).arg(loaded_bam_paths_.size()).arg(last_batch_.errors.size()));
+    refresh_loaded_bams();
+    status_->setText(QString("%1 result(s) ready · %2 issue(s)")
+        .arg(last_batch_.results.size()).arg(last_batch_.errors.size()));
+    QString issue_text;
+    for (const auto& error : last_batch_.errors) issue_text += QString::fromStdString(error) + '\n';
+    status_->setToolTip(issue_text.trimmed());
     if (results_->rowCount() > 0) {
         results_->selectRow(0);
-        show_result_details(0);
+        show_result_summary(0);
     } else {
-        summary_text_->clear();
-        copy_summary_button_->setEnabled(false);
-    }
-    if (!last_batch_.errors.empty()) {
-        QString issues = "Issues:\n";
-        for (const auto& error : last_batch_.errors) issues += QString::fromStdString(error) + '\n';
-        read_details_->setPlainText(issues);
+        summary_text_->setPlainText(issue_text.trimmed());
+        copy_summary_button_->setEnabled(!issue_text.trimmed().isEmpty());
     }
 }
 
-void MainWindow::show_result_details(const int row, const int) {
+void MainWindow::show_result_summary(const int row, const int) {
     if (row < 0 || static_cast<std::size_t>(row) >= last_batch_.results.size()) return;
     const auto* evidence = std::get_if<VariantEvidence>(&last_batch_.results[static_cast<std::size_t>(row)]);
     if (evidence == nullptr) return;
-    const auto summary = evidence_summary(*evidence, resource_label(result_bam_paths_[row]));
-    summary_text_->setPlainText(summary);
+    summary_text_->setPlainText(evidence_summary(*evidence, resource_label(result_bam_paths_[row])));
     copy_summary_button_->setEnabled(true);
-    QString text = "BAM: " + sanitized_resource_uri(result_bam_paths_[row])
-        + "\nGrouping: paired fragments by read name (no UMI)\n\n";
-    for (const auto& read : evidence->reads) {
-        text += QString::fromStdString(read.read_name) + (read.reverse_strand ? "  reverse  " : "  forward  ")
-            + QString::fromStdString(read.summary);
-        if (!read.molecule_id.empty()) text += "  fragment=" + QString::fromStdString(read.molecule_id);
-        text += '\n';
-    }
-    read_details_->setPlainText(text);
 }
 
 void MainWindow::copy_summary() {
     const auto summary = summary_text_->toPlainText().trimmed();
     if (summary.isEmpty()) return;
     QApplication::clipboard()->setText(summary);
-    status_->setText("Result summary copied to the clipboard.");
-}
-
-void MainWindow::export_audit() {
-    if (audit_watcher_.isRunning()) return;
-    if (last_batch_.results.empty() && last_batch_.errors.empty()) {
-        QMessageBox::information(this, "Nothing to export", "Calculate VAFs before exporting an audit record.");
-        return;
-    }
-    const auto path = QFileDialog::getSaveFileName(this, "Export audit JSON", "bam-seek-audit.json", "JSON files (*.json)");
-    if (path.isEmpty()) return;
-    export_button_->setEnabled(false);
-    load_bams_button_->setEnabled(false);
-    clear_bams_button_->setEnabled(false);
-    status_->setText("Creating audit fingerprints in the background…");
-
-    QJsonObject root{{"application", "BAM Seek"}, {"version", QStringLiteral(BAM_SEEK_VERSION)},
-        {"generated_utc", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)}, {"query_input", last_query_text_},
-        {"molecule_grouping", "paired fragments by read name (no UMI)"},
-        {"minimum_mapq", last_filters_.minimum_mapping_quality}, {"minimum_baseq", last_filters_.minimum_base_quality}};
-    QJsonArray result_array;
-    for (std::size_t result_index = 0; result_index < last_batch_.results.size(); ++result_index) {
-        const auto* evidence = std::get_if<VariantEvidence>(&last_batch_.results[result_index]);
-        if (evidence == nullptr) continue;
-        const auto bam = result_bam_paths_[static_cast<qsizetype>(result_index)];
-        const auto& counts = evidence->counts;
-        QJsonObject row{{"alignment", sanitized_resource_uri(bam)}, {"query", display_query(evidence->query)},
-            {"contig", QString::fromStdString(evidence->query.contig)}, {"position_one_based", evidence->query.position + 1},
-            {"reference_allele", QString::fromStdString(evidence->query.reference)},
-            {"alternate_allele", QString::fromStdString(evidence->query.alternate)},
-            {"ref_reads", counts.reference_reads}, {"alt_reads", counts.alternate_reads}, {"other_reads", counts.other_reads},
-            {"informative_read_depth", counts.informative_read_depth()}, {"vaf", counts.allele_fraction()},
-            {"ref_molecules", counts.reference_molecules}, {"alt_molecules", counts.alternate_molecules},
-            {"ambiguous_molecules", counts.other_molecules}, {"informative_molecule_depth", counts.molecule_depth()},
-            {"molecule_vaf", counts.molecule_allele_fraction()},
-            {"summary", evidence_summary(*evidence, resource_label(bam))}};
-        QJsonArray reads;
-        for (const auto& read : evidence->reads) {
-            reads.append(QJsonObject{{"name", QString::fromStdString(read.read_name)},
-                {"allele", QString::fromStdString(allele_name(read.allele))}, {"reverse", read.reverse_strand},
-                {"mapq", read.mapping_quality}, {"minimum_baseq", read.minimum_base_quality},
-                {"fragment", QString::fromStdString(read.molecule_id)}});
-        }
-        row["reads"] = reads;
-        result_array.append(row);
-    }
-    root["results"] = result_array;
-    QJsonArray errors;
-    for (const auto& error : last_batch_.errors) errors.append(QString::fromStdString(error));
-    root["errors"] = errors;
-
-    const auto alignments = configured_bam_paths_;
-    const auto indexes = configured_index_paths_;
-    audit_watcher_.setFuture(QtConcurrent::run([root = std::move(root), alignments, indexes, path]() mutable {
-        AuditSave result{path, {}};
-        QJsonArray alignment_array;
-        for (qsizetype source_index = 0; source_index < alignments.size(); ++source_index) {
-            QJsonObject resource{{"bam", file_identity(alignments[source_index])}};
-            resource["index"] = indexes[source_index].isEmpty()
-                ? QJsonObject{{"auto_discovery", true}, {"remote", true}}
-                : file_identity(indexes[source_index]);
-            alignment_array.append(resource);
-        }
-        root["alignments"] = alignment_array;
-        QSaveFile output(path);
-        if (!output.open(QIODevice::WriteOnly)) {
-            result.error = "Could not open the selected audit file for writing.";
-            return result;
-        }
-        const auto document = QJsonDocument(root).toJson(QJsonDocument::Indented);
-        if (output.write(document) != document.size() || !output.commit()) {
-            result.error = "Could not atomically save the complete audit file.";
-        }
-        return result;
-    }));
-}
-
-void MainWindow::audit_saved() {
-    const auto result = audit_watcher_.result();
-    export_button_->setEnabled(true);
-    load_bams_button_->setEnabled(true);
-    clear_bams_button_->setEnabled(!loaded_bam_paths_.isEmpty());
-    if (!result.error.empty()) {
-        QMessageBox::critical(this, "Export failed", QString::fromStdString(result.error));
-        status_->setText("Audit export failed.");
-        return;
-    }
-    status_->setText("Audit export saved: " + result.path);
+    status_->setText("Summary copied to clipboard.");
 }
 
 }  // namespace bamseek
