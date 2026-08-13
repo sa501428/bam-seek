@@ -23,9 +23,9 @@
 #include <QMimeData>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSettings>
 #include <QSize>
-#include <QSpinBox>
 #include <QSplitter>
 #include <QTabWidget>
 #include <QTableWidget>
@@ -179,6 +179,13 @@ QFrame#Card {
     border: 1px solid @BORDER@;
     border-radius: 14px;
 }
+QFrame#SummaryPanel {
+    background: @SUMMARY@;
+    border: 1px solid @SUMMARY_BORDER@;
+    border-radius: 10px;
+}
+QScrollArea { border: 0; background: @BG@; }
+QScrollArea > QWidget > QWidget { background: @BG@; }
 QLabel#SectionTitle { font-size: 16px; font-weight: 650; color: @TAB_SELECTED@; }
 QLabel#MutedLabel { color: @MUTED@; }
 QLabel#Pill {
@@ -189,7 +196,7 @@ QLabel#Pill {
     padding: 3px 10px;
     font-weight: 600;
 }
-QPlainTextEdit, QLineEdit, QListWidget, QTableWidget, QSpinBox {
+QPlainTextEdit, QLineEdit, QListWidget, QTableWidget {
     background: @FIELD@;
     color: @TEXT@;
     border: 1px solid @FIELD_BORDER@;
@@ -198,7 +205,7 @@ QPlainTextEdit, QLineEdit, QListWidget, QTableWidget, QSpinBox {
     selection-color: @SELECT_TEXT@;
 }
 QPlainTextEdit, QLineEdit, QListWidget { padding: 8px; }
-QPlainTextEdit:focus, QLineEdit:focus, QListWidget:focus, QTableWidget:focus, QSpinBox:focus {
+QPlainTextEdit:focus, QLineEdit:focus, QListWidget:focus, QTableWidget:focus {
     border: 1px solid #796cff;
 }
 QPlainTextEdit#SummaryBox {
@@ -329,19 +336,28 @@ MainWindow::MainWindow() {
     tabs_->setCornerWidget(theme_button_, Qt::TopRightCorner);
     apply_theme();
 
-    auto* analysis_page = new QWidget(tabs_);
-    auto* analysis_layout = new QVBoxLayout(analysis_page);
-    analysis_layout->setContentsMargins(4, 14, 4, 4);
+    auto* analysis_page = new QScrollArea(tabs_);
+    analysis_page->setWidgetResizable(true);
+    analysis_page->setFrameShape(QFrame::NoFrame);
+    analysis_page->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    analysis_page->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    auto* analysis_content = new QWidget(analysis_page);
+    analysis_content->setObjectName("AppRoot");
+    analysis_content->setMinimumSize(980, 650);
+    analysis_page->setWidget(analysis_content);
+    auto* analysis_layout = new QVBoxLayout(analysis_content);
+    analysis_layout->setContentsMargins(4, 14, 8, 8);
     analysis_layout->setSpacing(14);
 
-    auto* input_splitter = new QSplitter(Qt::Horizontal, analysis_page);
+    auto* input_splitter = new QSplitter(Qt::Horizontal, analysis_content);
     input_splitter->setChildrenCollapsible(false);
+    input_splitter->setFixedHeight(300);
 
     auto* bam_card = new QFrame(input_splitter);
     bam_card->setObjectName("Card");
     auto* bam_layout = new QVBoxLayout(bam_card);
-    bam_layout->setContentsMargins(18, 16, 18, 18);
-    bam_layout->setSpacing(11);
+    bam_layout->setContentsMargins(14, 12, 14, 14);
+    bam_layout->setSpacing(8);
     auto* bam_header = new QHBoxLayout();
     bam_header->addWidget(section_title("BAM sources", bam_card));
     bam_header->addStretch(1);
@@ -351,7 +367,7 @@ MainWindow::MainWindow() {
     bam_layout->addLayout(bam_header);
     bam_path_ = new QPlainTextEdit(bam_card);
     bam_path_->setPlaceholderText("/data/sample.bam\nhttps://example.org/sample.bam");
-    bam_path_->setMaximumHeight(72);
+    bam_path_->setMaximumHeight(58);
     bam_layout->addWidget(bam_path_);
     auto* bam_add_row = new QHBoxLayout();
     auto* browse_bam = new QPushButton("Choose files…", bam_card);
@@ -375,15 +391,15 @@ MainWindow::MainWindow() {
     loaded_bams_ = new QListWidget(bam_card);
     loaded_bams_->setAlternatingRowColors(false);
     loaded_bams_->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    loaded_bams_->setMinimumHeight(105);
+    loaded_bams_->setMinimumHeight(70);
     loaded_bams_->setToolTip("Prepared BAMs are reused when VAF calculation is requested.");
     bam_layout->addWidget(loaded_bams_, 1);
 
     auto* variant_card = new QFrame(input_splitter);
     variant_card->setObjectName("Card");
     auto* variant_layout = new QVBoxLayout(variant_card);
-    variant_layout->setContentsMargins(18, 16, 18, 18);
-    variant_layout->setSpacing(11);
+    variant_layout->setContentsMargins(14, 12, 14, 14);
+    variant_layout->setSpacing(8);
     variant_layout->addWidget(section_title("Variants", variant_card));
     query_text_ = new QPlainTextEdit(variant_card);
     query_text_->setPlaceholderText(
@@ -414,25 +430,31 @@ MainWindow::MainWindow() {
     analysis_layout->addWidget(input_splitter, 1);
 
     auto* action_row = new QHBoxLayout();
-    status_ = new QLabel("Add BAMs and variants to begin.", analysis_page);
+    status_ = new QLabel("Add BAMs and variants to begin.", analysis_content);
     status_->setObjectName("MutedLabel");
-    run_button_ = new QPushButton("Calculate VAFs", analysis_page);
+    run_button_ = new QPushButton("Calculate VAFs", analysis_content);
     run_button_->setObjectName("PrimaryButton");
     run_button_->setEnabled(false);
     action_row->addWidget(status_, 1);
     action_row->addWidget(run_button_);
     analysis_layout->addLayout(action_row);
 
-    auto* results_card = new QFrame(analysis_page);
+    auto* results_card = new QFrame(analysis_content);
     results_card->setObjectName("Card");
     auto* results_layout = new QVBoxLayout(results_card);
-    results_layout->setContentsMargins(16, 14, 16, 16);
-    results_layout->setSpacing(10);
+    results_layout->setContentsMargins(14, 12, 14, 14);
+    results_layout->setSpacing(8);
     results_layout->addWidget(section_title("VAF results", results_card));
     results_ = new QTableWidget(results_card);
     results_->setColumnCount(11);
-    results_->setHorizontalHeaderLabels({"BAM", "Variant", "ALT reads", "Read depth", "VAF",
-        "ALT molecules", "Molecule depth", "Molecule VAF", "OTHER/N", "Ambiguous", "ALT F / R"});
+    results_->setHorizontalHeaderLabels({"BAM", "Variant", "ALT reads", "Depth", "VAF",
+        "ALT mol.", "Mol. depth", "Mol. VAF", "Other/N", "Ambig.", "F / R"});
+    const QStringList result_header_tips{"BAM source", "Variant", "Alternate-supporting reads", "Informative read depth",
+        "Read variant allele frequency", "Alternate-supporting molecules", "Informative molecule depth",
+        "Molecule variant allele frequency", "OTHER/N reads", "Ambiguous molecules", "ALT forward / reverse reads"};
+    for (int column = 0; column < result_header_tips.size(); ++column) {
+        results_->horizontalHeaderItem(column)->setToolTip(result_header_tips[column]);
+    }
     results_->setAlternatingRowColors(true);
     results_->setSelectionBehavior(QAbstractItemView::SelectRows);
     results_->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -441,22 +463,29 @@ MainWindow::MainWindow() {
     results_->verticalHeader()->setVisible(false);
     results_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     results_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-    results_->setMinimumHeight(175);
+    results_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    results_->setMinimumHeight(100);
     results_layout->addWidget(results_, 1);
+    auto* summary_panel = new QFrame(results_card);
+    summary_panel->setObjectName("SummaryPanel");
+    auto* summary_layout = new QVBoxLayout(summary_panel);
+    summary_layout->setContentsMargins(10, 6, 10, 8);
+    summary_layout->setSpacing(5);
     auto* summary_header = new QHBoxLayout();
-    summary_header->addWidget(muted_label("Summary", results_card));
+    summary_header->addWidget(muted_label("Summary", summary_panel));
     summary_header->addStretch(1);
-    copy_summary_button_ = new QPushButton("Copy summary", results_card);
+    copy_summary_button_ = new QPushButton("Copy summary", summary_panel);
     copy_summary_button_->setEnabled(false);
     summary_header->addWidget(copy_summary_button_);
-    results_layout->addLayout(summary_header);
-    summary_text_ = new QPlainTextEdit(results_card);
+    summary_layout->addLayout(summary_header);
+    summary_text_ = new QPlainTextEdit(summary_panel);
     summary_text_->setObjectName("SummaryBox");
     summary_text_->setReadOnly(true);
-    summary_text_->setMaximumHeight(90);
+    summary_text_->setFixedHeight(48);
     summary_text_->setPlaceholderText("Select a result to generate a copy-ready paragraph.");
-    results_layout->addWidget(summary_text_);
-    analysis_layout->addWidget(results_card, 2);
+    summary_layout->addWidget(summary_text_);
+    results_layout->addWidget(summary_panel);
+    analysis_layout->addWidget(results_card, 1);
 
     auto* broadcast_page = new QWidget(tabs_);
     auto* broadcast_layout = new QVBoxLayout(broadcast_page);
@@ -468,10 +497,10 @@ MainWindow::MainWindow() {
     auto* receiver_controls = new QHBoxLayout();
     receiver_enabled_ = new QCheckBox("Receiver enabled", receiver_card);
     receiver_enabled_->setChecked(true);
-    receiver_port_ = new QSpinBox(receiver_card);
-    receiver_port_->setRange(1024, 65535);
-    receiver_port_->setValue(60151);
-    receiver_port_->setMaximumWidth(100);
+    receiver_port_ = new QLineEdit("60151", receiver_card);
+    receiver_port_->setValidator(new QIntValidator(1024, 65535, receiver_port_));
+    receiver_port_->setAlignment(Qt::AlignCenter);
+    receiver_port_->setMaximumWidth(88);
     receiver_status_ = new QLabel(receiver_card);
     receiver_status_->setObjectName("MutedLabel");
     receiver_controls->addWidget(receiver_enabled_);
@@ -507,7 +536,7 @@ MainWindow::MainWindow() {
 
     command_receiver_ = new IgvCommandReceiver(this);
     connect(receiver_enabled_, &QCheckBox::toggled, this, [this](const bool enabled) { set_receiver_enabled(enabled); });
-    connect(receiver_port_, &QSpinBox::valueChanged, this, [this] {
+    connect(receiver_port_, &QLineEdit::editingFinished, this, [this] {
         if (receiver_enabled_->isChecked()) set_receiver_enabled(true);
     });
     connect(command_receiver_, &IgvCommandReceiver::request_received, this, [this](const QString& description) {
@@ -555,7 +584,12 @@ void MainWindow::set_receiver_enabled(const bool enabled) {
         command_receiver_->close();
         return;
     }
-    (void)command_receiver_->listen(static_cast<quint16>(receiver_port_->value()));
+    if (!receiver_port_->hasAcceptableInput()) {
+        command_receiver_->close();
+        receiver_status_->setText("Enter a port from 1024 to 65535");
+        return;
+    }
+    (void)command_receiver_->listen(receiver_port_->text().toUShort());
 }
 
 void MainWindow::append_received_command(const QString& description) {

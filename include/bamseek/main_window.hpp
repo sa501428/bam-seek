@@ -16,7 +16,6 @@ class QLineEdit;
 class QListWidget;
 class QPlainTextEdit;
 class QPushButton;
-class QSpinBox;
 class QTableWidget;
 class QTabWidget;
 
@@ -68,7 +67,7 @@ private:
     QPushButton* clear_bams_button_{};
     QPlainTextEdit* broadcast_text_{};
     QCheckBox* receiver_enabled_{};
-    QSpinBox* receiver_port_{};
+    QLineEdit* receiver_port_{};
     QLabel* receiver_status_{};
     IgvCommandReceiver* command_receiver_{};
     bool dark_mode_ = true;
