@@ -12,6 +12,7 @@
 
 namespace bamseek {
 
+// raw_reads groups alignments into paired fragments by read name; it does not use a UMI.
 enum class MoleculeMode { raw_reads, auto_detect, selected_tag };
 enum class Allele { reference, alternate, other, no_call };
 
@@ -21,10 +22,10 @@ struct FilterSettings {
     bool include_duplicates = false;
     bool include_secondary = false;
     bool include_supplementary = false;
-    double minimum_variant_allele_fraction = 0.0005;
+    double minimum_variant_allele_fraction = 0.0;
     int minimum_alternate_reads = 1;
     int minimum_alternate_molecules = 1;
-    MoleculeMode molecule_mode = MoleculeMode::auto_detect;
+    MoleculeMode molecule_mode = MoleculeMode::raw_reads;
     std::string molecule_tag;
 };
 

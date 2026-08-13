@@ -7,6 +7,10 @@
 int main() {
     bamseek::EvidenceEngine engine({.uri = BAM_SEEK_TEST_BAM, .reference_uri = BAM_SEEK_TEST_REFERENCE});
     bamseek::FilterSettings filters;
+    if (filters.molecule_mode != bamseek::MoleculeMode::raw_reads) {
+        std::cerr << "Paired-fragment grouping without a UMI must be the default\n";
+        return EXIT_FAILURE;
+    }
     filters.minimum_mapping_quality = 0;
     filters.minimum_base_quality = 0;
     filters.molecule_mode = bamseek::MoleculeMode::raw_reads;
@@ -75,20 +79,24 @@ int main() {
         {bamseek::VariantQuery{"chr1:15 A>T", "chr1", 14, "A", "T"}}, auto_filters);
     const auto& auto_snv = std::get<bamseek::VariantEvidence>(auto_batch.results.front());
     if (!auto_snv.molecule_counts_available || auto_snv.counts.alternate_molecules != 3
-        || auto_snv.molecule_tag_used != "read pairs/fragments") {
+        || auto_snv.molecule_tag_used != "paired fragments by read name") {
         std::cerr << "Auto grouping must fall back to read pairs/fragments\n";
         return EXIT_FAILURE;
     }
 
+    auto paired_filters = molecule_filters;
+    paired_filters.molecule_mode = bamseek::MoleculeMode::raw_reads;
+    paired_filters.molecule_tag.clear();
     const auto paired_batch = evidence_engine.evaluate(
-        {bamseek::VariantQuery{"chr1:75 A>T", "chr1", 74, "A", "T"}}, auto_filters);
+        {bamseek::VariantQuery{"chr1:75 A>T", "chr1", 74, "A", "T"}}, paired_filters);
     if (!paired_batch.errors.empty() || paired_batch.results.size() != 1) return EXIT_FAILURE;
     const auto& paired = std::get<bamseek::VariantEvidence>(paired_batch.results.front());
     if (paired.counts.reference_reads != 2 || paired.counts.alternate_reads != 3
         || paired.counts.informative_read_depth() != 5 || std::abs(paired.counts.allele_fraction() - 0.6) > 1e-12
         || paired.counts.reference_molecules != 1 || paired.counts.alternate_molecules != 2
         || paired.counts.molecule_depth() != 3
-        || std::abs(paired.counts.molecule_allele_fraction() - (2.0 / 3.0)) > 1e-12) {
+        || std::abs(paired.counts.molecule_allele_fraction() - (2.0 / 3.0)) > 1e-12
+        || paired.molecule_tag_used != "paired fragments by read name") {
         std::cerr << "Read-pair molecule consensus regression\n";
         return EXIT_FAILURE;
     }

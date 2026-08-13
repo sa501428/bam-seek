@@ -369,7 +369,7 @@ VariantEvidence evaluate_variant(const igv::AlignmentReader& reader, const Varia
             : Allele::other);
     }
     evidence.molecule_counts_available = !molecule_calls.empty();
-    evidence.molecule_tag_used = selected_tag.empty() ? "read pairs/fragments" : selected_tag;
+    evidence.molecule_tag_used = selected_tag.empty() ? "paired fragments by read name" : selected_tag;
     if (!selected_tag.empty() && used_fragment_fallback) evidence.molecule_tag_used += " + pair fallback";
     const bool molecule_threshold_met = evidence.molecule_counts_available
         && evidence.counts.alternate_molecules >= filters.minimum_alternate_molecules;

@@ -179,7 +179,7 @@ ParsedQueries parse_queries(const std::string& text, const std::vector<ClinicalV
                     clinical->coding_change, clinical->protein_change.empty() ? mapping.protein_change : clinical->protein_change});
             } else if (matches.empty()) {
                 result.errors.push_back("Line " + std::to_string(line_number)
-                    + ": no genomic mapping found for clinical notation; provide an inline genomic allele or a local mapping TSV");
+                    + ": clinical-only notation cannot be resolved in the BAM VAF workflow; include the genomic coordinate and REF>ALT allele");
             } else {
                 result.errors.push_back("Line " + std::to_string(line_number)
                     + ": clinical notation maps to multiple loci/transcripts; include a transcript accession or genomic allele");

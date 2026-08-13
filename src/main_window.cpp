@@ -1,47 +1,42 @@
 #include <bamseek/main_window.hpp>
 
 #include <bamseek/igv_command_receiver.hpp>
-#include <bamseek/pileup_view.hpp>
 #include <bamseek/query.hpp>
 
-#include <QComboBox>
+#include <QApplication>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QCryptographicHash>
 #include <QDateTime>
-#include <QDoubleValidator>
 #include <QDragEnterEvent>
-#include <QFileDialog>
 #include <QFile>
+#include <QFileDialog>
 #include <QFileInfo>
-#include <QFormLayout>
 #include <QFuture>
-#include <QtConcurrentRun>
+#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QIntValidator>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QIntValidator>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMessageBox>
 #include <QMimeData>
-#include <QIODevice>
 #include <QPlainTextEdit>
 #include <QPushButton>
-#include <QRegularExpression>
-#include <QRegularExpressionValidator>
 #include <QSaveFile>
-#include <QScrollArea>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
-#include <QUrl>
+#include <QtConcurrentRun>
 
 #include <algorithm>
 #include <stdexcept>
@@ -63,32 +58,6 @@ QString display_query(const VariantQuery& query) {
     return clinical + " | " + genomic;
 }
 
-QString mode_name(const MoleculeMode mode) {
-    switch (mode) {
-        case MoleculeMode::raw_reads: return "Read pairs/fragments (no UMI)";
-        case MoleculeMode::auto_detect: return "Auto-detect UMI; pair fallback";
-        case MoleculeMode::selected_tag: return "Selected UMI tag; pair fallback";
-    }
-    return "Unknown";
-}
-
-QString evidence_summary(const VariantEvidence& evidence) {
-    const auto& counts = evidence.counts;
-    const auto query = display_query(evidence.query);
-    const auto read_vaf = QString::number(counts.allele_fraction() * 100.0, 'f', 4) + '%';
-    if (!evidence.molecule_counts_available) {
-        return QString("For %1, ALT (%2) was seen in %3/%4 individual reads (read VAF %5); molecule consensus was unavailable. %6 OTHER/N read(s) were excluded from VAF.")
-            .arg(query, QString::fromStdString(evidence.query.alternate))
-            .arg(counts.alternate_reads).arg(counts.informative_read_depth()).arg(read_vaf).arg(counts.other_reads);
-    }
-    const auto molecule_vaf = QString::number(counts.molecule_allele_fraction() * 100.0, 'f', 4) + '%';
-    return QString("For %1, ALT (%2) was seen in %3/%4 consensus reads (unique molecules; molecule VAF %5) and %6/%7 individual reads (read VAF %8). %9 OTHER/N read(s) and %10 ambiguous molecule(s) were excluded from VAF.")
-        .arg(query, QString::fromStdString(evidence.query.alternate))
-        .arg(counts.alternate_molecules).arg(counts.molecule_depth()).arg(molecule_vaf)
-        .arg(counts.alternate_reads).arg(counts.informative_read_depth()).arg(read_vaf)
-        .arg(counts.other_reads).arg(counts.other_molecules);
-}
-
 QString sanitized_resource_uri(const QString& path) {
     if (!path.startsWith("https://")) return path;
     QUrl sanitized(path);
@@ -99,13 +68,74 @@ QString sanitized_resource_uri(const QString& path) {
     return sanitized.toString();
 }
 
-std::string sanitized_error(std::string message, const std::vector<std::string>& resources) {
-    auto sanitized_message = QString::fromStdString(message);
-    for (const auto& resource : resources) {
-        const auto original = QString::fromStdString(resource);
-        if (original.startsWith("https://")) sanitized_message.replace(original, sanitized_resource_uri(original));
+QString resource_label(const QString& path) {
+    const auto name = path.startsWith("https://") ? QFileInfo(QUrl(path).path()).fileName() : QFileInfo(path).fileName();
+    return name.isEmpty() ? sanitized_resource_uri(path) : name;
+}
+
+std::string sanitized_error(std::string message, const QString& resource) {
+    auto sanitized = QString::fromStdString(message);
+    if (resource.startsWith("https://")) sanitized.replace(resource, sanitized_resource_uri(resource));
+    return sanitized.toStdString();
+}
+
+QString index_path_for(const QString& bam) {
+    const QFileInfo info(bam);
+    const QStringList candidates{
+        bam + ".bai",
+        bam + ".csi",
+        info.absolutePath() + '/' + info.completeBaseName() + ".bai",
+        info.absolutePath() + '/' + info.completeBaseName() + ".csi",
+    };
+    for (const auto& candidate : candidates) {
+        if (QFileInfo::exists(candidate)) return candidate;
     }
-    return sanitized_message.toStdString();
+    return {};
+}
+
+QStringList nonempty_lines(const QPlainTextEdit* edit) {
+    QStringList result;
+    for (auto line : edit->toPlainText().split('\n')) {
+        line = line.trimmed();
+        if (!line.isEmpty()) result.append(line);
+    }
+    return result;
+}
+
+void append_resource_lines(QPlainTextEdit* edit, const QStringList& paths) {
+    auto existing = edit->toPlainText();
+    if (!existing.isEmpty() && !existing.endsWith('\n')) existing += '\n';
+    edit->setPlainText(existing + paths.join('\n'));
+    auto cursor = edit->textCursor();
+    cursor.movePosition(QTextCursor::End);
+    edit->setTextCursor(cursor);
+}
+
+QString percent(const double fraction) {
+    return QString::number(fraction * 100.0, 'f', 3) + '%';
+}
+
+QString evidence_summary(const VariantEvidence& evidence, const QString& bam_label) {
+    const auto& counts = evidence.counts;
+    const auto query = display_query(evidence.query);
+    const auto molecule_vaf = evidence.molecule_counts_available
+        ? percent(counts.molecule_allele_fraction())
+        : QString("unavailable");
+    return QString("In %1, %2 was supported by %3 of %4 informative reads (VAF %5; %6 REF and %7 OTHER/N reads). "
+                   "After collapsing reads with the same read name into paired fragments, %8 of %9 informative molecules supported the variant "
+                   "(molecule VAF %10; %11 ambiguous fragments). ALT support included %12 forward and %13 reverse reads.")
+        .arg(bam_label, query)
+        .arg(counts.alternate_reads)
+        .arg(counts.informative_read_depth())
+        .arg(percent(counts.allele_fraction()))
+        .arg(counts.reference_reads)
+        .arg(counts.other_reads)
+        .arg(evidence.molecule_counts_available ? QString::number(counts.alternate_molecules) : "N/A")
+        .arg(evidence.molecule_counts_available ? QString::number(counts.molecule_depth()) : "N/A")
+        .arg(molecule_vaf)
+        .arg(evidence.molecule_counts_available ? QString::number(counts.other_molecules) : "N/A")
+        .arg(counts.alternate_forward_reads)
+        .arg(counts.alternate_reverse_reads);
 }
 
 QJsonObject file_identity(const QString& path) {
@@ -129,199 +159,119 @@ QJsonObject file_identity(const QString& path) {
     return identity;
 }
 
-QString index_path_for(const QString& alignment) {
-    const QStringList candidates{alignment + ".bai", alignment + ".csi", alignment + ".crai",
-        QFileInfo(alignment).absolutePath() + '/' + QFileInfo(alignment).completeBaseName() + ".bai",
-        QFileInfo(alignment).absolutePath() + '/' + QFileInfo(alignment).completeBaseName() + ".csi",
-        QFileInfo(alignment).absolutePath() + '/' + QFileInfo(alignment).completeBaseName() + ".crai"};
-    for (const auto& candidate : candidates) if (QFileInfo::exists(candidate)) return candidate;
-    return {};
-}
-
-QStringList nonempty_lines(const QPlainTextEdit* edit) {
-    QStringList result;
-    for (auto line : edit->toPlainText().split('\n')) {
-        line = line.trimmed();
-        if (!line.isEmpty()) result.append(line);
-    }
-    return result;
-}
-
-QStringList index_lines_for(const QPlainTextEdit* edit, const qsizetype count) {
-    auto lines = edit->toPlainText().split('\n', Qt::KeepEmptyParts);
-    for (auto& line : lines) line = line.trimmed();
-    while (!lines.isEmpty() && lines.back().isEmpty() && lines.size() > count) lines.removeLast();
-    lines.resize(count);
-    return lines;
-}
-
-void append_resource_lines(QPlainTextEdit* edit, const QStringList& paths) {
-    auto existing = edit->toPlainText();
-    if (!existing.isEmpty() && !existing.endsWith('\n')) existing += '\n';
-    edit->setPlainText(existing + paths.join('\n'));
-    auto cursor = edit->textCursor();
-    cursor.movePosition(QTextCursor::End);
-    edit->setTextCursor(cursor);
-}
-
-QString resource_label(const QString& path) {
-    const QUrl url(path);
-    const auto name = path.startsWith("https://") ? QFileInfo(url.path()).fileName() : QFileInfo(path).fileName();
-    return name.isEmpty() ? sanitized_resource_uri(path) : name;
-}
-
 }  // namespace
 
 MainWindow::MainWindow() {
-    setWindowTitle("BAM Seek — targeted BAM evidence");
+    setWindowTitle("BAM Seek — variant allele frequency");
     setAcceptDrops(true);
-    resize(1240, 820);
+    resize(1220, 820);
 
     auto* root = new QWidget(this);
     auto* layout = new QVBoxLayout(root);
-    auto* input_form = new QFormLayout();
+
+    auto* bam_group = new QGroupBox("1. Add BAMs", root);
+    auto* bam_group_layout = new QVBoxLayout(bam_group);
     auto* bam_row = new QHBoxLayout();
-    bam_path_ = new QPlainTextEdit(root);
-    bam_path_->setPlaceholderText("One BAM/CRAM path or HTTPS URL per line");
-    bam_path_->setMaximumHeight(70);
-    bam_path_->setToolTip("Editable list: use one local path or HTTPS URL per line. Each BAM is evaluated separately.");
-    auto* browse_bam = new QPushButton("Browse…", root);
-    load_bams_button_ = new QPushButton("Load BAM(s)", root);
-    load_bams_button_->setToolTip("Add the pending paths to the active BAM set used for VAF computation.");
-    bam_row->addWidget(bam_path_);
+    bam_path_ = new QPlainTextEdit(bam_group);
+    bam_path_->setPlaceholderText("One local path or HTTPS BAM URL per line, or drag local BAMs here");
+    bam_path_->setMaximumHeight(62);
+    auto* browse_bam = new QPushButton("Choose BAMs…", bam_group);
+    load_bams_button_ = new QPushButton("Add to analysis", bam_group);
+    bam_row->addWidget(bam_path_, 1);
     bam_row->addWidget(browse_bam);
     bam_row->addWidget(load_bams_button_);
-    input_form->addRow("BAM / CRAM paths or URLs", bam_row);
-    auto* index_row = new QHBoxLayout();
-    index_path_ = new QPlainTextEdit(root);
-    index_path_->setPlaceholderText("Optional: one index per BAM line; leave a line blank for automatic discovery");
-    index_path_->setMaximumHeight(70);
-    index_path_->setToolTip("Line N is the explicit index for BAM line N. A blank line uses automatic discovery.");
-    auto* browse_index = new QPushButton("Browse…", root);
-    index_row->addWidget(index_path_);
-    index_row->addWidget(browse_index);
-    input_form->addRow("Index", index_row);
+    bam_group_layout->addLayout(bam_row);
     auto* loaded_row = new QHBoxLayout();
-    loaded_bams_ = new QListWidget(root);
-    loaded_bams_->setMaximumHeight(92);
+    loaded_bams_ = new QListWidget(bam_group);
+    loaded_bams_->setMaximumHeight(82);
     loaded_bams_->setAlternatingRowColors(true);
     loaded_bams_->setSelectionMode(QAbstractItemView::NoSelection);
-    loaded_bams_->setToolTip("Only BAMs shown in this active list are included when evidence and VAF are computed.");
-    clear_bams_button_ = new QPushButton("Clear all BAMs", root);
+    clear_bams_button_ = new QPushButton("Clear BAMs", bam_group);
     clear_bams_button_->setEnabled(false);
-    loaded_row->addWidget(loaded_bams_);
+    loaded_row->addWidget(loaded_bams_, 1);
     loaded_row->addWidget(clear_bams_button_, 0, Qt::AlignTop);
-    input_form->addRow("Actively loaded BAMs", loaded_row);
-    auto* reference_row = new QHBoxLayout();
-    reference_path_ = new QLineEdit(root);
-    reference_path_->setPlaceholderText("Optional for BAM; required for CRAM (hg19 FASTA)");
-    reference_path_->setClearButtonEnabled(true);
-    reference_path_->setToolTip("Editable: type or paste the indexed reference FASTA path/URL. Browse is optional.");
-    auto* browse_reference = new QPushButton("Browse…", root);
-    reference_row->addWidget(reference_path_);
-    reference_row->addWidget(browse_reference);
-    input_form->addRow("Reference", reference_row);
-    auto* clinical_mapping_row = new QHBoxLayout();
-    clinical_mapping_path_ = new QLineEdit(root);
-    clinical_mapping_path_->setPlaceholderText("Optional local TSV for resolving GENE c.… p.… to hg19 genomic alleles");
-    clinical_mapping_path_->setClearButtonEnabled(true);
-    clinical_mapping_path_->setToolTip("Editable: type or paste a local clinical-variant mapping TSV path. Browse is optional.");
-    auto* browse_clinical_mapping = new QPushButton("Browse…", root);
-    clinical_mapping_row->addWidget(clinical_mapping_path_);
-    clinical_mapping_row->addWidget(browse_clinical_mapping);
-    input_form->addRow("Clinical mapping TSV", clinical_mapping_row);
-    layout->addLayout(input_form);
+    bam_group_layout->addLayout(loaded_row);
+    layout->addWidget(bam_group);
 
-    auto* settings = new QHBoxLayout();
-    molecule_mode_ = new QComboBox(root);
-    molecule_mode_->addItem("Auto UMI; pair fallback", static_cast<int>(MoleculeMode::auto_detect));
-    molecule_mode_->addItem("Read pairs / fragments", static_cast<int>(MoleculeMode::raw_reads));
-    molecule_mode_->addItem("Selected UMI tag; pair fallback", static_cast<int>(MoleculeMode::selected_tag));
-    molecule_tag_ = new QLineEdit(root);
-    molecule_tag_->setPlaceholderText("e.g. MI");
-    molecule_tag_->setEnabled(false);
-    vaf_ = new QLineEdit("0.05", root);
-    minimum_alt_reads_ = new QLineEdit("1", root);
-    minimum_alt_molecules_ = new QLineEdit("1", root);
-    minimum_mapq_ = new QLineEdit("20", root);
-    minimum_baseq_ = new QLineEdit("20", root);
-    vaf_->setValidator(new QDoubleValidator(0.0, 100.0, 6, vaf_));
-    minimum_alt_reads_->setValidator(new QIntValidator(1, 1000000000, minimum_alt_reads_));
-    minimum_alt_molecules_->setValidator(new QIntValidator(1, 1000000000, minimum_alt_molecules_));
+    auto* query_group = new QGroupBox("2. Enter variants", root);
+    auto* query_layout = new QVBoxLayout(query_group);
+    query_text_ = new QPlainTextEdit(query_group);
+    query_text_->setPlaceholderText("One variant per line");
+    query_text_->setPlainText(
+        "# Accepted examples (one-based coordinates)\n"
+        "# chr7:140453136 A>T\n"
+        "# chr7:g.140453136A>T\n"
+        "# chr7 140453136 A T\n"
+        "# chr7 140453136 . A T\n"
+        "# BRAF c.1799T>A p.V600E chr7:140453136 A>T");
+    query_text_->setMaximumHeight(150);
+    query_layout->addWidget(query_text_);
+    auto* filter_row = new QHBoxLayout();
+    minimum_mapq_ = new QLineEdit("20", query_group);
+    minimum_baseq_ = new QLineEdit("20", query_group);
+    minimum_mapq_->setMaximumWidth(60);
+    minimum_baseq_->setMaximumWidth(60);
     minimum_mapq_->setValidator(new QIntValidator(0, 255, minimum_mapq_));
     minimum_baseq_->setValidator(new QIntValidator(0, 255, minimum_baseq_));
-    molecule_tag_->setMaxLength(2);
-    molecule_tag_->setValidator(new QRegularExpressionValidator(QRegularExpression("[A-Za-z][A-Za-z0-9]"), molecule_tag_));
-    settings->addWidget(new QLabel("Molecule grouping", root)); settings->addWidget(molecule_mode_);
-    settings->addWidget(molecule_tag_);
-    settings->addWidget(new QLabel("Min VAF (%)", root)); settings->addWidget(vaf_);
-    settings->addWidget(new QLabel("Min alt reads", root)); settings->addWidget(minimum_alt_reads_);
-    settings->addWidget(new QLabel("Min alt molecules", root)); settings->addWidget(minimum_alt_molecules_);
-    settings->addWidget(new QLabel("Min mapQ", root)); settings->addWidget(minimum_mapq_);
-    settings->addWidget(new QLabel("Min baseQ", root)); settings->addWidget(minimum_baseq_);
-    layout->addLayout(settings);
-    auto* flags = new QHBoxLayout();
-    include_duplicates_ = new QCheckBox("Include duplicates", root);
-    include_secondary_ = new QCheckBox("Include secondary alignments", root);
-    include_supplementary_ = new QCheckBox("Include supplementary alignments", root);
-    flags->addWidget(include_duplicates_); flags->addWidget(include_secondary_); flags->addWidget(include_supplementary_); flags->addStretch(1);
-    layout->addLayout(flags);
+    filter_row->addWidget(new QLabel("Minimum mapQ", query_group));
+    filter_row->addWidget(minimum_mapq_);
+    filter_row->addSpacing(16);
+    filter_row->addWidget(new QLabel("Minimum baseQ", query_group));
+    filter_row->addWidget(minimum_baseq_);
+    filter_row->addStretch(1);
+    filter_row->addWidget(new QLabel("Molecules are paired fragments grouped by read name (no UMI).", query_group));
+    query_layout->addLayout(filter_row);
+    layout->addWidget(query_group);
 
-    query_text_ = new QPlainTextEdit(root);
-    query_text_->setPlaceholderText("One query per line:\nchr7:140453136 A>T\nchr1:100000-101000");
-    query_text_->setPlainText("# One-based genomic or clinical notation\n# chr7:140453136 A>T\n# BRAF c.1799T>A p.V600E chr7:140453136 A>T");
-    layout->addWidget(query_text_, 1);
-
-    auto* buttons = new QHBoxLayout();
-    run_button_ = new QPushButton("Query evidence", root);
-    pileup_button_ = new QPushButton("View pileup", root);
+    auto* action_row = new QHBoxLayout();
+    run_button_ = new QPushButton("Calculate VAFs", root);
     export_button_ = new QPushButton("Export audit JSON…", root);
-    status_ = new QLabel("Enter an indexed BAM/CRAM, choose Load BAM(s), then enter queries.", root);
-    buttons->addWidget(run_button_); buttons->addWidget(pileup_button_); buttons->addWidget(export_button_); buttons->addWidget(status_, 1);
-    layout->addLayout(buttons);
+    status_ = new QLabel("Add one or more BAMs, enter variants, then calculate VAFs.", root);
+    action_row->addWidget(run_button_);
+    action_row->addWidget(export_button_);
+    action_row->addWidget(status_, 1);
+    layout->addLayout(action_row);
 
     tabs_ = new QTabWidget(root);
-    auto* evidence_tab = new QWidget(tabs_);
-    auto* evidence_layout = new QVBoxLayout(evidence_tab);
-    evidence_layout->setContentsMargins(0, 0, 0, 0);
-    auto* splitter = new QSplitter(Qt::Vertical, evidence_tab);
+    auto* results_tab = new QWidget(tabs_);
+    auto* results_layout = new QVBoxLayout(results_tab);
+    results_layout->setContentsMargins(0, 0, 0, 0);
+    auto* splitter = new QSplitter(Qt::Vertical, results_tab);
     results_ = new QTableWidget(splitter);
-    results_->setColumnCount(19);
-    results_->setHorizontalHeaderLabels({"BAM / CRAM", "Query", "Status", "REF reads", "ALT reads", "REF+ALT reads", "Read VAF",
-        "REF molecules", "ALT molecules", "REF+ALT molecules", "Molecule VAF", "OTHER/N reads", "Ambiguous molecules",
-        "ALT Fwd", "ALT Rev", "Strand P", "Molecule grouping", "Missing tags", "Evidence summary"});
+    results_->setColumnCount(12);
+    results_->setHorizontalHeaderLabels({"BAM", "Variant", "Observed", "ALT reads", "Read depth", "VAF",
+        "ALT molecules", "Molecule depth", "Molecule VAF", "OTHER/N reads", "Ambiguous molecules", "Summary"});
     results_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    results_->setSelectionMode(QAbstractItemView::SingleSelection);
     results_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     results_->horizontalHeader()->setStretchLastSection(true);
-    read_details_ = new QPlainTextEdit(splitter);
+    results_->verticalHeader()->setVisible(false);
+
+    auto* details = new QWidget(splitter);
+    auto* details_layout = new QVBoxLayout(details);
+    details_layout->setContentsMargins(0, 0, 0, 0);
+    auto* summary_row = new QHBoxLayout();
+    summary_row->addWidget(new QLabel("Copyable result summary", details));
+    summary_row->addStretch(1);
+    copy_summary_button_ = new QPushButton("Copy summary", details);
+    copy_summary_button_->setEnabled(false);
+    summary_row->addWidget(copy_summary_button_);
+    details_layout->addLayout(summary_row);
+    summary_text_ = new QPlainTextEdit(details);
+    summary_text_->setReadOnly(true);
+    summary_text_->setMaximumHeight(88);
+    summary_text_->setPlaceholderText("Select a result to create a concise summary paragraph.");
+    details_layout->addWidget(summary_text_);
+    read_details_ = new QPlainTextEdit(details);
     read_details_->setReadOnly(true);
-    read_details_->setPlaceholderText("Select a variant result to inspect supporting reads.");
+    read_details_->setPlaceholderText("Per-read evidence for the selected result appears here.");
+    details_layout->addWidget(read_details_);
     splitter->addWidget(results_);
-    splitter->addWidget(read_details_);
-    splitter->setSizes({330, 220});
-    evidence_layout->addWidget(splitter);
-    tabs_->addTab(evidence_tab, "Evidence");
-    auto* pileup_tab = new QWidget(tabs_);
-    auto* pileup_layout = new QVBoxLayout(pileup_tab);
-    auto* pileup_controls = new QHBoxLayout();
-    group_pairs_ = new QCheckBox("Group and link read pairs", pileup_tab);
-    group_pairs_->setChecked(true);
-    pileup_controls->addWidget(group_pairs_);
-    pileup_controls->addWidget(new QLabel("Blue: forward   Red: reverse   Yellow: mismatch   Green: indel   Gray: low base quality", pileup_tab));
-    pileup_controls->addStretch(1);
-    pileup_layout->addLayout(pileup_controls);
-    pileup_summary_ = new QLabel(pileup_tab);
-    pileup_summary_->setWordWrap(true);
-    pileup_summary_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    pileup_summary_->setText("Select a targeted variant result and choose View pileup.");
-    pileup_layout->addWidget(pileup_summary_);
-    pileup_scroll_ = new QScrollArea(pileup_tab);
-    pileup_scroll_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-    pileup_view_ = new PileupView(pileup_scroll_);
-    pileup_scroll_->setWidget(pileup_view_);
-    pileup_scroll_->setWidgetResizable(false);
-    pileup_layout->addWidget(pileup_scroll_);
-    tabs_->addTab(pileup_tab, "Pileup");
+    splitter->addWidget(details);
+    splitter->setSizes({360, 230});
+    results_layout->addWidget(splitter);
+    tabs_->addTab(results_tab, "VAF results");
+
     auto* broadcast_tab = new QWidget(tabs_);
     auto* broadcast_layout = new QVBoxLayout(broadcast_tab);
     auto* receiver_controls = new QHBoxLayout();
@@ -338,30 +288,22 @@ MainWindow::MainWindow() {
     receiver_controls->addWidget(receiver_status_, 1);
     broadcast_layout->addLayout(receiver_controls);
     broadcast_text_ = new QPlainTextEdit(broadcast_tab);
-    broadcast_text_->setPlaceholderText("Received IGV /load and /goto information will be appended here. This box remains editable; received commands never load files or change the current query.");
-    broadcast_text_->setToolTip("Passive inbox. Editing this text does not trigger any BAM Seek action.");
+    broadcast_text_->setPlaceholderText("Received IGV /load and /goto information is appended here. The receiver remains passive.");
     broadcast_layout->addWidget(broadcast_text_);
     tabs_->addTab(broadcast_tab, "Broadcast inbox");
-    layout->addWidget(tabs_, 2);
+    layout->addWidget(tabs_, 1);
     setCentralWidget(root);
 
-    connect(browse_bam, &QPushButton::clicked, this, [this] { choose_bam(); });
-    connect(browse_index, &QPushButton::clicked, this, [this] { choose_index(); });
+    connect(browse_bam, &QPushButton::clicked, this, [this] { choose_bams(); });
     connect(load_bams_button_, &QPushButton::clicked, this, [this] { load_bams(); });
     connect(clear_bams_button_, &QPushButton::clicked, this, [this] { clear_loaded_bams(); });
-    connect(browse_reference, &QPushButton::clicked, this, [this] { choose_reference(); });
-    connect(browse_clinical_mapping, &QPushButton::clicked, this, [this] { choose_clinical_mapping(); });
     connect(run_button_, &QPushButton::clicked, this, [this] { run_queries(); });
-    connect(pileup_button_, &QPushButton::clicked, this, [this] { show_pileup(); });
+    connect(copy_summary_button_, &QPushButton::clicked, this, [this] { copy_summary(); });
     connect(export_button_, &QPushButton::clicked, this, [this] { export_audit(); });
-    connect(molecule_mode_, &QComboBox::currentIndexChanged, this, [this] {
-        molecule_tag_->setEnabled(molecule_mode_->currentData().toInt() == static_cast<int>(MoleculeMode::selected_tag));
-    });
-    connect(results_, &QTableWidget::cellClicked, this, [this](const int row, const int column) { show_read_details(row, column); });
+    connect(results_, &QTableWidget::cellClicked, this, [this](const int row, const int column) { show_result_details(row, column); });
     connect(&watcher_, &QFutureWatcher<MultiBamBatch>::finished, this, [this] { show_results(); });
-    connect(&pileup_watcher_, &QFutureWatcher<PileupLoad>::finished, this, [this] { pileup_loaded(); });
     connect(&audit_watcher_, &QFutureWatcher<AuditSave>::finished, this, [this] { audit_saved(); });
-    connect(group_pairs_, &QCheckBox::toggled, this, [this](const bool enabled) { pileup_view_->set_group_pairs(enabled); });
+
     command_receiver_ = new IgvCommandReceiver(this);
     connect(receiver_enabled_, &QCheckBox::toggled, this, [this](const bool enabled) { set_receiver_enabled(enabled); });
     connect(receiver_port_, &QSpinBox::valueChanged, this, [this] {
@@ -400,102 +342,76 @@ void MainWindow::dragEnterEvent(QDragEnterEvent* event) {
 }
 
 void MainWindow::dropEvent(QDropEvent* event) {
-    const auto urls = event->mimeData()->urls();
-    QStringList files;
-    for (const auto& url : urls) if (url.isLocalFile()) files.append(url.toLocalFile());
-    if (files.isEmpty()) return;
-    append_resource_lines(bam_path_, files);
-    status_->setText(QString("%1 pending BAM/CRAM path(s) added. Choose Load BAM(s) to activate them.").arg(files.size()));
+    QStringList bams;
+    for (const auto& url : event->mimeData()->urls()) {
+        if (url.isLocalFile() && url.toLocalFile().endsWith(".bam", Qt::CaseInsensitive)) bams.append(url.toLocalFile());
+    }
+    if (bams.isEmpty()) return;
+    append_resource_lines(bam_path_, bams);
+    status_->setText(QString("%1 BAM path(s) added. Choose Add to analysis.").arg(bams.size()));
     event->acceptProposedAction();
 }
 
-void MainWindow::choose_bam() {
-    const auto files = QFileDialog::getOpenFileNames(this, "Choose indexed BAM or CRAM files", {}, "Alignment files (*.bam *.cram *.sam);;All files (*)");
+void MainWindow::choose_bams() {
+    const auto files = QFileDialog::getOpenFileNames(this, "Choose BAM files", {}, "BAM files (*.bam)");
     if (!files.isEmpty()) append_resource_lines(bam_path_, files);
 }
 
-void MainWindow::choose_index() {
-    const auto files = QFileDialog::getOpenFileNames(this, "Choose alignment indexes in BAM order", {}, "Alignment indexes (*.bai *.csi *.crai);;All files (*)");
-    if (!files.isEmpty()) append_resource_lines(index_path_, files);
-}
-
 void MainWindow::load_bams() {
-    if (watcher_.isRunning() || pileup_watcher_.isRunning() || audit_watcher_.isRunning()) return;
+    if (watcher_.isRunning() || audit_watcher_.isRunning()) return;
     const auto pending_bams = nonempty_lines(bam_path_);
-    const auto pending_indexes = index_lines_for(index_path_, pending_bams.size());
     if (pending_bams.isEmpty()) {
-        QMessageBox::information(this, "No pending BAM", "Type, paste, browse, or drop a BAM/CRAM path, then choose Load BAM(s).");
+        QMessageBox::information(this, "No pending BAM", "Type, paste, browse, or drop one or more BAM paths or HTTPS URLs first.");
         return;
     }
 
     QStringList issues;
     int added = 0;
-    int updated = 0;
-    for (qsizetype pending_index = 0; pending_index < pending_bams.size(); ++pending_index) {
-        const auto bam = pending_bams[pending_index];
-        auto index = pending_indexes[pending_index];
-        const auto remote_bam = bam.startsWith("https://");
-        if (bam.startsWith("http://") || (!remote_bam && bam.contains("://"))) {
-            issues.append(resource_label(bam) + ": only local paths and HTTPS URLs are accepted.");
+    for (const auto& bam : pending_bams) {
+        const bool remote = bam.startsWith("https://");
+        const QFileInfo info(bam);
+        const QUrl remote_url(bam);
+        if ((bam.contains("://") && !remote)
+            || (remote && (!remote_url.isValid() || remote_url.host().isEmpty()))
+            || (!remote && !bam.endsWith(".bam", Qt::CaseInsensitive))) {
+            issues.append(sanitized_resource_uri(bam) + ": expected a local .bam path or valid HTTPS BAM URL.");
             continue;
         }
-        if (!remote_bam && !QFileInfo::exists(bam)) {
-            issues.append(bam + ": alignment file not found.");
+        if (!remote && (!info.exists() || !info.isFile())) {
+            issues.append(bam + ": BAM file not found.");
             continue;
         }
-        if (!index.isEmpty()) {
-            const auto remote_index = index.startsWith("https://");
-            if (index.startsWith("http://") || (!remote_index && index.contains("://"))) {
-                issues.append(resource_label(bam) + ": index must be a local path or HTTPS URL.");
-                continue;
-            }
-            if (!remote_index && !QFileInfo::exists(index)) {
-                issues.append(resource_label(bam) + ": explicit index file not found.");
-                continue;
-            }
-        } else if (!remote_bam) {
-            index = index_path_for(bam);
-            if (index.isEmpty()) {
-                issues.append(resource_label(bam) + ": no accompanying .bai, .csi, or .crai index was found.");
-                continue;
-            }
+        const auto index = remote ? QString{} : index_path_for(bam);
+        if (!remote && index.isEmpty()) {
+            issues.append(resource_label(bam) + ": no .bai or .csi index was found beside the BAM.");
+            continue;
         }
-
-        const auto existing = loaded_bam_paths_.indexOf(bam);
-        if (existing >= 0) {
-            if (!index.isEmpty() || loaded_index_paths_[existing].isEmpty()) loaded_index_paths_[existing] = index;
-            ++updated;
-        } else {
-            loaded_bam_paths_.append(bam);
-            loaded_index_paths_.append(index);
-            ++added;
-        }
+        if (loaded_bam_paths_.contains(bam)) continue;
+        loaded_bam_paths_.append(bam);
+        loaded_index_paths_.append(index);
+        ++added;
     }
-
     refresh_loaded_bams();
-    if (added > 0 || updated > 0) {
-        bam_path_->clear();
-        index_path_->clear();
-    }
-    status_->setText(QString("%1 active BAM(s); %2 added, %3 updated. VAF queries use this active set.")
-        .arg(loaded_bam_paths_.size()).arg(added).arg(updated));
-    if (!issues.isEmpty()) QMessageBox::warning(this, "Some BAMs were not loaded", issues.join('\n'));
+    if (added > 0) bam_path_->clear();
+    status_->setText(QString("%1 BAM(s) active; %2 added. Each BAM will receive a separate VAF result.")
+        .arg(loaded_bam_paths_.size()).arg(added));
+    if (!issues.isEmpty()) QMessageBox::warning(this, "Some BAMs were not added", issues.join('\n'));
 }
 
 void MainWindow::clear_loaded_bams() {
-    if (watcher_.isRunning() || pileup_watcher_.isRunning() || audit_watcher_.isRunning()) return;
+    if (watcher_.isRunning() || audit_watcher_.isRunning()) return;
     loaded_bam_paths_.clear();
     loaded_index_paths_.clear();
     configured_bam_paths_.clear();
     configured_index_paths_.clear();
     result_bam_paths_.clear();
-    result_index_paths_.clear();
     last_batch_ = {};
     results_->setRowCount(0);
+    summary_text_->clear();
     read_details_->clear();
-    pileup_view_->set_data({});
+    copy_summary_button_->setEnabled(false);
     refresh_loaded_bams();
-    status_->setText("All BAMs cleared. Load at least one BAM before computing VAF.");
+    status_->setText("All BAMs cleared.");
 }
 
 void MainWindow::refresh_loaded_bams() {
@@ -503,36 +419,22 @@ void MainWindow::refresh_loaded_bams() {
     for (qsizetype index = 0; index < loaded_bam_paths_.size(); ++index) {
         const auto& bam = loaded_bam_paths_[index];
         const auto& bam_index = loaded_index_paths_[index];
-        auto* item = new QListWidgetItem(resource_label(bam)
-            + (bam_index.isEmpty() ? "  —  index: automatic" : "  —  index: " + resource_label(bam_index)), loaded_bams_);
-        item->setToolTip("BAM/CRAM: " + sanitized_resource_uri(bam) + "\nIndex: "
-            + (bam_index.isEmpty() ? "automatic" : sanitized_resource_uri(bam_index)));
+        const auto index_status = bam_index.isEmpty() ? "remote index: automatic" : "index found automatically";
+        auto* item = new QListWidgetItem(resource_label(bam) + "  —  " + index_status, loaded_bams_);
+        item->setToolTip("BAM: " + sanitized_resource_uri(bam) + "\nIndex: "
+            + (bam_index.isEmpty() ? "automatic remote discovery" : bam_index));
     }
     clear_bams_button_->setEnabled(!loaded_bam_paths_.isEmpty() && !watcher_.isRunning());
 }
 
-void MainWindow::choose_reference() {
-    const auto file = QFileDialog::getOpenFileName(this, "Choose hg19 reference FASTA", {}, "FASTA files (*.fa *.fasta *.fna);;All files (*)");
-    if (!file.isEmpty()) reference_path_->setText(file);
-}
-
-void MainWindow::choose_clinical_mapping() {
-    const auto file = QFileDialog::getOpenFileName(this, "Choose local clinical mapping TSV", {}, "TSV files (*.tsv *.txt);;All files (*)");
-    if (!file.isEmpty()) clinical_mapping_path_->setText(file);
-}
-
 FilterSettings MainWindow::filters() const {
     FilterSettings values;
-    values.molecule_mode = static_cast<MoleculeMode>(molecule_mode_->currentData().toInt());
-    values.molecule_tag = molecule_tag_->text().trimmed().toStdString();
-    values.minimum_variant_allele_fraction = std::max(0.0, vaf_->text().toDouble() / 100.0);
-    values.minimum_alternate_reads = std::max(1, minimum_alt_reads_->text().toInt());
-    values.minimum_alternate_molecules = std::max(1, minimum_alt_molecules_->text().toInt());
     values.minimum_mapping_quality = std::max(0, minimum_mapq_->text().toInt());
     values.minimum_base_quality = std::max(0, minimum_baseq_->text().toInt());
-    values.include_duplicates = include_duplicates_->isChecked();
-    values.include_secondary = include_secondary_->isChecked();
-    values.include_supplementary = include_supplementary_->isChecked();
+    values.minimum_variant_allele_fraction = 0.0;
+    values.minimum_alternate_reads = 1;
+    values.minimum_alternate_molecules = 1;
+    values.molecule_mode = MoleculeMode::raw_reads;
     return values;
 }
 
@@ -540,65 +442,55 @@ void MainWindow::run_queries() {
     const auto bams = loaded_bam_paths_;
     const auto indexes = loaded_index_paths_;
     if (bams.isEmpty()) {
-        QMessageBox::warning(this, "No active alignment file", "Type or browse to a BAM/CRAM, choose Load BAM(s), and then run the query.");
+        QMessageBox::warning(this, "No active BAM", "Add at least one indexed BAM before calculating VAFs.");
         return;
     }
-    const auto has_insecure_resource = [](const QStringList& resources) {
-        return std::any_of(resources.cbegin(), resources.cend(), [](const QString& value) { return value.startsWith("http://"); });
-    };
-    if (has_insecure_resource(bams) || has_insecure_resource(indexes) || reference_path_->text().startsWith("http://")) {
-        QMessageBox::warning(this, "Secure remote access", "BAM Seek accepts local paths or HTTPS resources only. HTTP URLs are not permitted.");
+    if (!minimum_mapq_->hasAcceptableInput() || !minimum_baseq_->hasAcceptableInput()) {
+        QMessageBox::warning(this, "Invalid read filters", "MapQ and baseQ must be integers from 0 to 255.");
         return;
     }
-    if (!vaf_->hasAcceptableInput() || !minimum_alt_reads_->hasAcceptableInput() || !minimum_alt_molecules_->hasAcceptableInput()
-        || !minimum_mapq_->hasAcceptableInput() || !minimum_baseq_->hasAcceptableInput()
-        || (molecule_mode_->currentData().toInt() == static_cast<int>(MoleculeMode::selected_tag) && !molecule_tag_->hasAcceptableInput())) {
-        QMessageBox::warning(this, "Invalid filters", "Correct the highlighted numeric filters and enter a valid two-character BAM tag.");
+    auto parsed = parse_queries(query_text_->toPlainText().toStdString());
+    std::vector<Query> variants;
+    variants.reserve(parsed.queries.size());
+    for (auto& query : parsed.queries) {
+        if (std::holds_alternative<VariantQuery>(query)) variants.push_back(std::move(query));
+        else parsed.errors.push_back(std::get<RegionQuery>(query).source_text + ": region scans are not part of the VAF workflow; enter a specific REF>ALT variant");
+    }
+    if (variants.empty()) {
+        QMessageBox::warning(this, "No valid variants", QString::fromStdString(parsed.errors.empty() ? "Enter at least one variant." : parsed.errors.front()));
         return;
     }
-    const auto loaded_mappings = load_clinical_mappings(clinical_mapping_path_->text().trimmed().toStdString());
-    auto parsed = parse_queries(query_text_->toPlainText().toStdString(), loaded_mappings.mappings);
-    parsed.errors.insert(parsed.errors.begin(), loaded_mappings.errors.begin(), loaded_mappings.errors.end());
-    if (parsed.queries.empty()) {
-        QMessageBox::warning(this, "No valid queries", QString::fromStdString(parsed.errors.empty() ? "Enter at least one query." : parsed.errors.front()));
-        return;
-    }
+
     last_filters_ = filters();
     configured_bam_paths_ = bams;
     configured_index_paths_ = indexes;
-    last_reference_path_ = reference_path_->text().trimmed();
-    last_clinical_mapping_path_ = clinical_mapping_path_->text().trimmed();
     last_query_text_ = query_text_->toPlainText();
-    const auto reference = last_reference_path_.toStdString();
     run_button_->setEnabled(false);
     load_bams_button_->setEnabled(false);
     clear_bams_button_->setEnabled(false);
-    status_->setText(QString("Querying evidence in %1 alignment(s)…").arg(bams.size()));
-    watcher_.setFuture(QtConcurrent::run([queries = parsed.queries, errors = parsed.errors, filter_values = last_filters_, bams, indexes, reference] {
+    status_->setText(QString("Calculating VAFs in %1 BAM(s)…").arg(bams.size()));
+    watcher_.setFuture(QtConcurrent::run([queries = std::move(variants), errors = std::move(parsed.errors),
+                                          filter_values = last_filters_, bams, indexes] {
         MultiBamBatch combined;
         combined.batch.errors = errors;
         for (qsizetype source_index = 0; source_index < bams.size(); ++source_index) {
             const auto bam_qt = bams[source_index];
             const auto index_qt = indexes[source_index];
-            const auto bam = bam_qt.toStdString();
-            const auto index = index_qt.toStdString();
             try {
-                igv::Resource resource{.uri = bam};
-                if (!index.empty()) resource.index_uri = index;
-                if (!reference.empty()) resource.reference_uri = reference;
+                igv::Resource resource{.uri = bam_qt.toStdString()};
+                if (!index_qt.isEmpty()) resource.index_uri = index_qt.toStdString();
                 EvidenceEngine engine(std::move(resource));
                 auto evaluated = engine.evaluate(queries, filter_values);
                 for (auto& result : evaluated.results) {
                     combined.batch.results.push_back(std::move(result));
                     combined.result_bams.append(bam_qt);
-                    combined.result_indexes.append(index_qt);
                 }
                 for (auto& error : evaluated.errors) {
                     combined.batch.errors.push_back("[" + resource_label(bam_qt).toStdString() + "] " + error);
                 }
             } catch (const std::exception& error) {
                 combined.batch.errors.push_back("[" + resource_label(bam_qt).toStdString() + "] "
-                    + sanitized_error(error.what(), {bam, index, reference}));
+                    + sanitized_error(error.what(), bam_qt));
             }
         }
         return combined;
@@ -609,141 +501,71 @@ void MainWindow::show_results() {
     const auto combined = watcher_.result();
     last_batch_ = combined.batch;
     result_bam_paths_ = combined.result_bams;
-    result_index_paths_ = combined.result_indexes;
     results_->setRowCount(0);
     for (int index = 0; index < static_cast<int>(last_batch_.results.size()); ++index) {
+        const auto* evidence = std::get_if<VariantEvidence>(&last_batch_.results[static_cast<std::size_t>(index)]);
+        if (evidence == nullptr) continue;
         results_->insertRow(index);
-        const auto& result = last_batch_.results[static_cast<std::size_t>(index)];
-        if (const auto* evidence = std::get_if<VariantEvidence>(&result)) {
-            const auto& count = evidence->counts;
-            const auto strand_p = count.strand_bias_p_value();
-            const QList<QString> values{resource_label(result_bam_paths_[index]), display_query(evidence->query), evidence->passes_thresholds ? "PRESENT" : "not detected",
-                QString::number(count.reference_reads), QString::number(count.alternate_reads), QString::number(count.informative_read_depth()),
-                QString::number(count.allele_fraction() * 100.0, 'f', 4) + '%',
-                evidence->molecule_counts_available ? QString::number(count.reference_molecules) : "N/A",
-                evidence->molecule_counts_available ? QString::number(count.alternate_molecules) : "N/A",
-                evidence->molecule_counts_available ? QString::number(count.molecule_depth()) : "N/A",
-                evidence->molecule_counts_available ? QString::number(count.molecule_allele_fraction() * 100.0, 'f', 4) + '%' : "N/A",
-                QString::number(count.other_reads), evidence->molecule_counts_available ? QString::number(count.other_molecules) : "N/A",
-                QString::number(count.alternate_forward_reads), QString::number(count.alternate_reverse_reads),
-                strand_p ? QString::number(*strand_p, 'g', 3) : "N/A",
-                QString::fromStdString(evidence->molecule_counts_available ? evidence->molecule_tag_used : "Unavailable"),
-                QString::number(evidence->reads_missing_molecule_tag), evidence_summary(*evidence)};
-            for (int column = 0; column < values.size(); ++column) {
-                auto* item = new QTableWidgetItem(values[column]);
-                if (column == 0) item->setToolTip(sanitized_resource_uri(result_bam_paths_[index]));
-                results_->setItem(index, column, item);
-            }
-        } else {
-            const auto& region = std::get<RegionEvidence>(result);
-            QList<QString> values(19);
-            values[0] = resource_label(result_bam_paths_[index]);
-            values[1] = QString::fromStdString(region.query.source_text);
-            values[2] = region.candidates.empty() ? "NO CANDIDATES" : "CANDIDATES";
-            values[18] = QString::fromStdString(region.note);
-            for (int column = 0; column < values.size(); ++column) {
-                auto* item = new QTableWidgetItem(values[column]);
-                if (column == 0) item->setToolTip(sanitized_resource_uri(result_bam_paths_[index]));
-                results_->setItem(index, column, item);
-            }
+        const auto& count = evidence->counts;
+        const auto bam_label = resource_label(result_bam_paths_[index]);
+        const QList<QString> values{bam_label, display_query(evidence->query), count.alternate_molecules > 0 ? "Yes" : "No",
+            QString::number(count.alternate_reads), QString::number(count.informative_read_depth()), percent(count.allele_fraction()),
+            QString::number(count.alternate_molecules), QString::number(count.molecule_depth()), percent(count.molecule_allele_fraction()),
+            QString::number(count.other_reads), QString::number(count.other_molecules), evidence_summary(*evidence, bam_label)};
+        for (int column = 0; column < values.size(); ++column) {
+            auto* item = new QTableWidgetItem(values[column]);
+            if (column == 0) item->setToolTip(sanitized_resource_uri(result_bam_paths_[index]));
+            results_->setItem(index, column, item);
         }
     }
     run_button_->setEnabled(true);
     load_bams_button_->setEnabled(true);
     clear_bams_button_->setEnabled(!loaded_bam_paths_.isEmpty());
-    status_->setText(QString("%1 result(s) from %2 active BAM(s), %3 issue(s). Select a row for read evidence.")
+    status_->setText(QString("%1 VAF result(s) from %2 BAM(s); %3 issue(s).")
         .arg(last_batch_.results.size()).arg(loaded_bam_paths_.size()).arg(last_batch_.errors.size()));
-    if (!last_batch_.errors.empty()) read_details_->setPlainText("Issues:\n" + QString::fromStdString([&] {
-        std::string combined;
-        for (const auto& error : last_batch_.errors) combined += error + '\n';
-        return combined;
-    }()));
+    if (results_->rowCount() > 0) {
+        results_->selectRow(0);
+        show_result_details(0);
+    } else {
+        summary_text_->clear();
+        copy_summary_button_->setEnabled(false);
+    }
+    if (!last_batch_.errors.empty()) {
+        QString issues = "Issues:\n";
+        for (const auto& error : last_batch_.errors) issues += QString::fromStdString(error) + '\n';
+        read_details_->setPlainText(issues);
+    }
 }
 
-void MainWindow::show_read_details(const int row, const int) {
+void MainWindow::show_result_details(const int row, const int) {
     if (row < 0 || static_cast<std::size_t>(row) >= last_batch_.results.size()) return;
     const auto* evidence = std::get_if<VariantEvidence>(&last_batch_.results[static_cast<std::size_t>(row)]);
-    if (evidence == nullptr) {
-        const auto& region = std::get<RegionEvidence>(last_batch_.results[static_cast<std::size_t>(row)]);
-        QString text = "Alignment: " + sanitized_resource_uri(result_bam_paths_[row]) + "\n" + QString::fromStdString(region.note) + "\n\n";
-        for (const auto& candidate : region.candidates) {
-            text += evidence_summary(candidate) + '\n';
-        }
-        read_details_->setPlainText(text);
-        return;
-    }
-    QString text = "Alignment: " + sanitized_resource_uri(result_bam_paths_[row]) + "\n" + evidence_summary(*evidence)
-        + "\nMolecule grouping: " + QString::fromStdString(evidence->molecule_counts_available ? evidence->molecule_tag_used : "unavailable") + "\n\n";
+    if (evidence == nullptr) return;
+    const auto summary = evidence_summary(*evidence, resource_label(result_bam_paths_[row]));
+    summary_text_->setPlainText(summary);
+    copy_summary_button_->setEnabled(true);
+    QString text = "BAM: " + sanitized_resource_uri(result_bam_paths_[row])
+        + "\nGrouping: paired fragments by read name (no UMI)\n\n";
     for (const auto& read : evidence->reads) {
         text += QString::fromStdString(read.read_name) + (read.reverse_strand ? "  reverse  " : "  forward  ")
             + QString::fromStdString(read.summary);
-        if (!read.molecule_id.empty()) text += "  molecule=" + QString::fromStdString(read.molecule_id);
+        if (!read.molecule_id.empty()) text += "  fragment=" + QString::fromStdString(read.molecule_id);
         text += '\n';
     }
     read_details_->setPlainText(text);
 }
 
-void MainWindow::show_pileup() {
-    if (pileup_watcher_.isRunning()) return;
-    const int row = results_->currentRow();
-    if (row < 0 || static_cast<std::size_t>(row) >= last_batch_.results.size()) {
-        QMessageBox::information(this, "Select a variant", "Select a targeted variant result, then choose View pileup.");
-        return;
-    }
-    const auto* evidence = std::get_if<VariantEvidence>(&last_batch_.results[static_cast<std::size_t>(row)]);
-    if (evidence == nullptr) {
-        QMessageBox::information(this, "Select a targeted variant", "Pileup is available for targeted variant rows. Region candidates can be pasted into the query box.");
-        return;
-    }
-    const auto bam = result_bam_paths_[row].toStdString();
-    const auto index = result_index_paths_[row].toStdString();
-    const auto reference = last_reference_path_.toStdString();
-    const auto query = evidence->query;
-    const auto filter_values = last_filters_;
-    const auto summary = evidence_summary(*evidence);
-    pileup_button_->setEnabled(false);
-    load_bams_button_->setEnabled(false);
-    clear_bams_button_->setEnabled(false);
-    status_->setText("Loading local alignment pileup…");
-    pileup_watcher_.setFuture(QtConcurrent::run([bam, index, reference, query, filter_values, summary] {
-        PileupLoad loaded;
-        loaded.summary = summary;
-        try {
-            igv::Resource resource{.uri = bam};
-            if (!index.empty()) resource.index_uri = index;
-            if (!reference.empty()) resource.reference_uri = reference;
-            EvidenceEngine engine(std::move(resource));
-            loaded.data = engine.pileup(query, filter_values, 40);
-        } catch (const std::exception& error) {
-            loaded.error = sanitized_error(error.what(), {bam, index, reference});
-        }
-        return loaded;
-    }));
-}
-
-void MainWindow::pileup_loaded() {
-    const auto loaded = pileup_watcher_.result();
-    pileup_button_->setEnabled(true);
-    load_bams_button_->setEnabled(true);
-    clear_bams_button_->setEnabled(!loaded_bam_paths_.isEmpty());
-    if (!loaded.error.empty()) {
-        QMessageBox::warning(this, "Pileup unavailable", QString::fromStdString(loaded.error));
-        status_->setText("Could not load pileup.");
-        pileup_summary_->setText("Pileup unavailable: " + QString::fromStdString(loaded.error));
-        return;
-    }
-    pileup_view_->set_data(loaded.data);
-    pileup_summary_->setText(loaded.summary);
-    tabs_->setCurrentIndex(1);
-    pileup_scroll_->ensureVisible(pileup_view_->variant_x(), 0, 120, 20);
-    status_->setText(QString("Rendered %1 of %2 filtered alignments locally%3.")
-        .arg(loaded.data.alignments.size()).arg(loaded.data.total_alignments).arg(loaded.data.truncated ? " (display limit reached)" : ""));
+void MainWindow::copy_summary() {
+    const auto summary = summary_text_->toPlainText().trimmed();
+    if (summary.isEmpty()) return;
+    QApplication::clipboard()->setText(summary);
+    status_->setText("Result summary copied to the clipboard.");
 }
 
 void MainWindow::export_audit() {
     if (audit_watcher_.isRunning()) return;
     if (last_batch_.results.empty() && last_batch_.errors.empty()) {
-        QMessageBox::information(this, "Nothing to export", "Run an evidence query before exporting an audit record.");
+        QMessageBox::information(this, "Nothing to export", "Calculate VAFs before exporting an audit record.");
         return;
     }
     const auto path = QFileDialog::getSaveFileName(this, "Export audit JSON", "bam-seek-audit.json", "JSON files (*.json)");
@@ -752,84 +574,55 @@ void MainWindow::export_audit() {
     load_bams_button_->setEnabled(false);
     clear_bams_button_->setEnabled(false);
     status_->setText("Creating audit fingerprints in the background…");
-    QJsonObject root{{"application", "BAM Seek"}, {"version", QStringLiteral(BAM_SEEK_VERSION)}, {"generated_utc", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
-        {"query_input", last_query_text_},
-        {"molecule_mode", mode_name(last_filters_.molecule_mode)},
-        {"molecule_tag", QString::fromStdString(last_filters_.molecule_tag)},
-        {"minimum_vaf", last_filters_.minimum_variant_allele_fraction}, {"minimum_alt_reads", last_filters_.minimum_alternate_reads},
-        {"minimum_alt_molecules", last_filters_.minimum_alternate_molecules}, {"minimum_mapq", last_filters_.minimum_mapping_quality}, {"minimum_baseq", last_filters_.minimum_base_quality},
-        {"include_duplicates", last_filters_.include_duplicates}, {"include_secondary", last_filters_.include_secondary}, {"include_supplementary", last_filters_.include_supplementary}};
+
+    QJsonObject root{{"application", "BAM Seek"}, {"version", QStringLiteral(BAM_SEEK_VERSION)},
+        {"generated_utc", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)}, {"query_input", last_query_text_},
+        {"molecule_grouping", "paired fragments by read name (no UMI)"},
+        {"minimum_mapq", last_filters_.minimum_mapping_quality}, {"minimum_baseq", last_filters_.minimum_base_quality}};
     QJsonArray result_array;
-    const auto variant_json = [](const VariantEvidence& evidence) {
-        QJsonObject row{{"query", display_query(evidence.query)}, {"present", evidence.passes_thresholds},
-            {"depth", evidence.counts.depth()}, {"total_called_reads", evidence.counts.depth()},
-            {"informative_read_depth", evidence.counts.informative_read_depth()},
-            {"gene", QString::fromStdString(evidence.query.gene)}, {"transcript", QString::fromStdString(evidence.query.transcript)},
-            {"coding_change", QString::fromStdString(evidence.query.coding_change)}, {"protein_change", QString::fromStdString(evidence.query.protein_change)},
-            {"contig", QString::fromStdString(evidence.query.contig)}, {"position_one_based", evidence.query.position + 1},
-            {"reference_allele", QString::fromStdString(evidence.query.reference)}, {"alternate_allele", QString::fromStdString(evidence.query.alternate)},
-            {"ref_reads", evidence.counts.reference_reads}, {"other_reads", evidence.counts.other_reads},
-            {"ref_forward_reads", evidence.counts.reference_forward_reads}, {"ref_reverse_reads", evidence.counts.reference_reverse_reads},
-            {"alt_reads", evidence.counts.alternate_reads}, {"alt_forward_reads", evidence.counts.alternate_forward_reads},
-            {"alt_reverse_reads", evidence.counts.alternate_reverse_reads}, {"read_vaf", evidence.counts.allele_fraction()},
-            {"vaf", evidence.counts.allele_fraction()},
-            {"molecule_counts_available", evidence.molecule_counts_available}, {"reads_missing_molecule_tag", evidence.reads_missing_molecule_tag},
-            {"molecule_tag", QString::fromStdString(evidence.molecule_tag_used)},
-            {"molecule_grouping", QString::fromStdString(evidence.molecule_tag_used)}, {"evidence_summary", evidence_summary(evidence)}};
-        row["alt_molecules"] = evidence.molecule_counts_available ? QJsonValue(evidence.counts.alternate_molecules) : QJsonValue::Null;
-        row["ref_molecules"] = evidence.molecule_counts_available ? QJsonValue(evidence.counts.reference_molecules) : QJsonValue::Null;
-        row["other_molecules"] = evidence.molecule_counts_available ? QJsonValue(evidence.counts.other_molecules) : QJsonValue::Null;
-        row["informative_molecule_depth"] = evidence.molecule_counts_available ? QJsonValue(evidence.counts.molecule_depth()) : QJsonValue::Null;
-        row["molecule_vaf"] = evidence.molecule_counts_available ? QJsonValue(evidence.counts.molecule_allele_fraction()) : QJsonValue::Null;
-        const auto strand_p = evidence.counts.strand_bias_p_value();
-        row["strand_bias_fisher_p"] = strand_p ? QJsonValue(*strand_p) : QJsonValue::Null;
-        QJsonArray reads;
-        for (const auto& read : evidence.reads) reads.append(QJsonObject{{"name", QString::fromStdString(read.read_name)}, {"allele", QString::fromStdString(allele_name(read.allele))}, {"reverse", read.reverse_strand}, {"mapq", read.mapping_quality}, {"minimum_baseq", read.minimum_base_quality}, {"molecule", QString::fromStdString(read.molecule_id)}, {"summary", QString::fromStdString(read.summary)}});
-        row["reads"] = reads;
-        return row;
-    };
     for (std::size_t result_index = 0; result_index < last_batch_.results.size(); ++result_index) {
-        const auto& item = last_batch_.results[result_index];
-        const auto source = sanitized_resource_uri(result_bam_paths_[static_cast<qsizetype>(result_index)]);
-        if (const auto* evidence = std::get_if<VariantEvidence>(&item)) {
-            auto row = variant_json(*evidence);
-            row["alignment"] = source;
-            result_array.append(row);
-        } else {
-            const auto& region = std::get<RegionEvidence>(item);
-            QJsonObject row{{"alignment", source}, {"region", QString::fromStdString(region.query.source_text)}, {"note", QString::fromStdString(region.note)}};
-            QJsonArray candidates;
-            for (const auto& candidate : region.candidates) candidates.append(variant_json(candidate));
-            row["candidates"] = candidates;
-            result_array.append(row);
+        const auto* evidence = std::get_if<VariantEvidence>(&last_batch_.results[result_index]);
+        if (evidence == nullptr) continue;
+        const auto bam = result_bam_paths_[static_cast<qsizetype>(result_index)];
+        const auto& counts = evidence->counts;
+        QJsonObject row{{"alignment", sanitized_resource_uri(bam)}, {"query", display_query(evidence->query)},
+            {"contig", QString::fromStdString(evidence->query.contig)}, {"position_one_based", evidence->query.position + 1},
+            {"reference_allele", QString::fromStdString(evidence->query.reference)},
+            {"alternate_allele", QString::fromStdString(evidence->query.alternate)},
+            {"ref_reads", counts.reference_reads}, {"alt_reads", counts.alternate_reads}, {"other_reads", counts.other_reads},
+            {"informative_read_depth", counts.informative_read_depth()}, {"vaf", counts.allele_fraction()},
+            {"ref_molecules", counts.reference_molecules}, {"alt_molecules", counts.alternate_molecules},
+            {"ambiguous_molecules", counts.other_molecules}, {"informative_molecule_depth", counts.molecule_depth()},
+            {"molecule_vaf", counts.molecule_allele_fraction()},
+            {"summary", evidence_summary(*evidence, resource_label(bam))}};
+        QJsonArray reads;
+        for (const auto& read : evidence->reads) {
+            reads.append(QJsonObject{{"name", QString::fromStdString(read.read_name)},
+                {"allele", QString::fromStdString(allele_name(read.allele))}, {"reverse", read.reverse_strand},
+                {"mapq", read.mapping_quality}, {"minimum_baseq", read.minimum_base_quality},
+                {"fragment", QString::fromStdString(read.molecule_id)}});
         }
+        row["reads"] = reads;
+        result_array.append(row);
     }
     root["results"] = result_array;
     QJsonArray errors;
     for (const auto& error : last_batch_.errors) errors.append(QString::fromStdString(error));
     root["errors"] = errors;
+
     const auto alignments = configured_bam_paths_;
-    auto indexes = configured_index_paths_;
-    for (qsizetype source_index = 0; source_index < alignments.size(); ++source_index) {
-        if (indexes[source_index].isEmpty() && !alignments[source_index].startsWith("https://")) {
-            indexes[source_index] = index_path_for(alignments[source_index]);
-        }
-    }
-    const auto reference = last_reference_path_;
-    const auto clinical_mapping = last_clinical_mapping_path_;
-    audit_watcher_.setFuture(QtConcurrent::run([root = std::move(root), alignments, indexes, reference, clinical_mapping, path]() mutable {
+    const auto indexes = configured_index_paths_;
+    audit_watcher_.setFuture(QtConcurrent::run([root = std::move(root), alignments, indexes, path]() mutable {
         AuditSave result{path, {}};
         QJsonArray alignment_array;
         for (qsizetype source_index = 0; source_index < alignments.size(); ++source_index) {
-            QJsonObject resource{{"alignment", file_identity(alignments[source_index])}};
+            QJsonObject resource{{"bam", file_identity(alignments[source_index])}};
             resource["index"] = indexes[source_index].isEmpty()
-                ? QJsonObject{{"auto_detected", true}}
+                ? QJsonObject{{"auto_discovery", true}, {"remote", true}}
                 : file_identity(indexes[source_index]);
             alignment_array.append(resource);
         }
         root["alignments"] = alignment_array;
-        root["reference"] = file_identity(reference);
-        root["clinical_mapping"] = file_identity(clinical_mapping);
         QSaveFile output(path);
         if (!output.open(QIODevice::WriteOnly)) {
             result.error = "Could not open the selected audit file for writing.";
