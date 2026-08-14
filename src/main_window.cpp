@@ -6,6 +6,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QComboBox>
 #include <QDateTime>
 #include <QDragEnterEvent>
 #include <QFileDialog>
@@ -203,7 +204,7 @@ QLabel#CurrentRole, QLabel#HistoricalRole {
 }
 QLabel#CurrentRole { color: @CURRENT_TEXT@; background: @CURRENT_BG@; border: 1px solid @CURRENT_BORDER@; }
 QLabel#HistoricalRole { color: @HISTORY_TEXT@; background: @HISTORY_BG@; border: 1px solid @HISTORY_BORDER@; }
-QPlainTextEdit, QLineEdit, QListWidget, QTableWidget {
+QPlainTextEdit, QLineEdit, QComboBox, QListWidget, QTableWidget {
     background: @FIELD@;
     color: @TEXT@;
     border: 1px solid @FIELD_BORDER@;
@@ -211,8 +212,8 @@ QPlainTextEdit, QLineEdit, QListWidget, QTableWidget {
     selection-background-color: @SELECT@;
     selection-color: @SELECT_TEXT@;
 }
-QPlainTextEdit, QLineEdit, QListWidget { padding: 8px; }
-QPlainTextEdit:focus, QLineEdit:focus, QListWidget:focus, QTableWidget:focus {
+QPlainTextEdit, QLineEdit, QComboBox, QListWidget { padding: 8px; }
+QPlainTextEdit:focus, QLineEdit:focus, QComboBox:focus, QListWidget:focus, QTableWidget:focus {
     border: 1px solid #796cff;
 }
 QPlainTextEdit#SummaryBox {
@@ -331,7 +332,8 @@ MainWindow::MainWindow() {
     resize(1440, 980);
     setMinimumSize(1080, 760);
     setFont(QFontDatabase::systemFont(QFontDatabase::GeneralFont));
-    dark_mode_ = QSettings().value("appearance/dark_mode", true).toBool();
+    QSettings stored_settings;
+    dark_mode_ = stored_settings.value("appearance/dark_mode", true).toBool();
     setStyleSheet(premium_style(dark_mode_));
 
     auto* root = new QWidget(this);
@@ -430,22 +432,6 @@ MainWindow::MainWindow() {
     historical_query_text_->setPlaceholderText(
         "5 176943930 DDX41 ENST00000507955.1 MISSENSE c.17C>T p.P6L G A");
     variant_layout->addWidget(historical_query_text_, 1);
-    auto* filter_row = new QHBoxLayout();
-    filter_row->addWidget(muted_label("mapQ ≥", variant_card));
-    minimum_mapq_ = new QLineEdit("20", variant_card);
-    minimum_mapq_->setMaximumWidth(58);
-    minimum_mapq_->setAlignment(Qt::AlignCenter);
-    minimum_mapq_->setValidator(new QIntValidator(0, 255, minimum_mapq_));
-    filter_row->addWidget(minimum_mapq_);
-    filter_row->addSpacing(12);
-    filter_row->addWidget(muted_label("baseQ ≥", variant_card));
-    minimum_baseq_ = new QLineEdit("20", variant_card);
-    minimum_baseq_->setMaximumWidth(58);
-    minimum_baseq_->setAlignment(Qt::AlignCenter);
-    minimum_baseq_->setValidator(new QIntValidator(0, 255, minimum_baseq_));
-    filter_row->addWidget(minimum_baseq_);
-    filter_row->addStretch(1);
-    variant_layout->addLayout(filter_row);
 
     input_splitter->addWidget(bam_card);
     input_splitter->addWidget(variant_card);
@@ -514,38 +500,133 @@ MainWindow::MainWindow() {
     results_layout->addWidget(summary_panel);
     analysis_layout->addWidget(results_card, 1);
 
-    auto* broadcast_page = new QWidget(tabs_);
-    auto* broadcast_layout = new QVBoxLayout(broadcast_page);
-    broadcast_layout->setContentsMargins(4, 14, 4, 4);
-    auto* receiver_card = new QFrame(broadcast_page);
+    auto* settings_page = new QScrollArea(tabs_);
+    settings_page->setWidgetResizable(true);
+    settings_page->setFrameShape(QFrame::NoFrame);
+    auto* settings_content = new QWidget(settings_page);
+    settings_content->setObjectName("AppRoot");
+    settings_page->setWidget(settings_content);
+    auto* settings_layout = new QVBoxLayout(settings_content);
+    settings_layout->setContentsMargins(4, 14, 8, 8);
+    settings_layout->setSpacing(14);
+
+    auto* evidence_settings_card = new QFrame(settings_content);
+    evidence_settings_card->setObjectName("Card");
+    auto* evidence_settings_layout = new QVBoxLayout(evidence_settings_card);
+    evidence_settings_layout->setContentsMargins(18, 16, 18, 18);
+    evidence_settings_layout->setSpacing(12);
+    evidence_settings_layout->addWidget(section_title("Evidence calculation", evidence_settings_card));
+    evidence_settings_layout->addWidget(muted_label(
+        "These settings apply to the next VAF calculation. Changes are saved automatically.", evidence_settings_card));
+
+    auto* quality_controls = new QHBoxLayout();
+    quality_controls->addWidget(muted_label("Minimum mapping quality", evidence_settings_card));
+    minimum_mapq_ = new QLineEdit(
+        QString::number(stored_settings.value("analysis/minimum_mapping_quality", 20).toInt()), evidence_settings_card);
+    minimum_mapq_->setMaximumWidth(72);
+    minimum_mapq_->setAlignment(Qt::AlignCenter);
+    minimum_mapq_->setValidator(new QIntValidator(0, 255, minimum_mapq_));
+    quality_controls->addWidget(minimum_mapq_);
+    quality_controls->addSpacing(22);
+    quality_controls->addWidget(muted_label("Minimum base quality", evidence_settings_card));
+    minimum_baseq_ = new QLineEdit(
+        QString::number(stored_settings.value("analysis/minimum_base_quality", 20).toInt()), evidence_settings_card);
+    minimum_baseq_->setMaximumWidth(72);
+    minimum_baseq_->setAlignment(Qt::AlignCenter);
+    minimum_baseq_->setValidator(new QIntValidator(0, 255, minimum_baseq_));
+    quality_controls->addWidget(minimum_baseq_);
+    quality_controls->addStretch(1);
+    evidence_settings_layout->addLayout(quality_controls);
+
+    auto* alignment_flags = new QHBoxLayout();
+    alignment_flags->addWidget(muted_label("Include alignments marked as", evidence_settings_card));
+    include_duplicates_ = new QCheckBox("Duplicates", evidence_settings_card);
+    include_duplicates_->setChecked(stored_settings.value("analysis/include_duplicates", false).toBool());
+    alignment_flags->addWidget(include_duplicates_);
+    include_secondary_ = new QCheckBox("Secondary", evidence_settings_card);
+    include_secondary_->setChecked(stored_settings.value("analysis/include_secondary", false).toBool());
+    alignment_flags->addWidget(include_secondary_);
+    include_supplementary_ = new QCheckBox("Supplementary", evidence_settings_card);
+    include_supplementary_->setChecked(stored_settings.value("analysis/include_supplementary", false).toBool());
+    alignment_flags->addWidget(include_supplementary_);
+    alignment_flags->addStretch(1);
+    evidence_settings_layout->addLayout(alignment_flags);
+
+    auto* molecule_controls = new QHBoxLayout();
+    molecule_controls->addWidget(muted_label("Molecule grouping", evidence_settings_card));
+    molecule_mode_ = new QComboBox(evidence_settings_card);
+    molecule_mode_->addItem("Paired fragments (read name)", static_cast<int>(MoleculeMode::raw_reads));
+    molecule_mode_->addItem("Auto-detect MI / RX / UB", static_cast<int>(MoleculeMode::auto_detect));
+    molecule_mode_->addItem("Specific BAM tag", static_cast<int>(MoleculeMode::selected_tag));
+    const auto stored_molecule_mode = stored_settings.value(
+        "analysis/molecule_mode", static_cast<int>(MoleculeMode::raw_reads)).toInt();
+    const auto molecule_mode_index = molecule_mode_->findData(stored_molecule_mode);
+    molecule_mode_->setCurrentIndex(molecule_mode_index < 0 ? 0 : molecule_mode_index);
+    molecule_controls->addWidget(molecule_mode_);
+    molecule_controls->addSpacing(12);
+    molecule_controls->addWidget(muted_label("Tag", evidence_settings_card));
+    molecule_tag_ = new QLineEdit(stored_settings.value("analysis/molecule_tag", "MI").toString().toUpper(),
+                                  evidence_settings_card);
+    molecule_tag_->setPlaceholderText("MI");
+    molecule_tag_->setMaxLength(2);
+    molecule_tag_->setMaximumWidth(64);
+    molecule_tag_->setAlignment(Qt::AlignCenter);
+    molecule_tag_->setEnabled(molecule_mode_->currentData().toInt() == static_cast<int>(MoleculeMode::selected_tag));
+    molecule_controls->addWidget(molecule_tag_);
+    molecule_controls->addStretch(1);
+    evidence_settings_layout->addLayout(molecule_controls);
+    evidence_settings_layout->addWidget(muted_label(
+        "Auto-detect uses MI, RX, or UB when at least 90% of callable alignments carry the tag; otherwise reads are grouped into paired fragments.",
+        evidence_settings_card));
+    settings_layout->addWidget(evidence_settings_card);
+
+    auto* receiver_card = new QFrame(settings_content);
     receiver_card->setObjectName("Card");
     auto* receiver_layout = new QVBoxLayout(receiver_card);
     receiver_layout->setContentsMargins(18, 16, 18, 18);
+    receiver_layout->setSpacing(10);
+    receiver_layout->addWidget(section_title("IGV command relay", receiver_card));
+    receiver_layout->addWidget(muted_label(
+        "BAM Seek listens only on localhost, records broadcast commands below, and forwards their bytes unchanged to IGV.",
+        receiver_card));
     auto* receiver_controls = new QHBoxLayout();
     receiver_enabled_ = new QCheckBox("Receiver enabled", receiver_card);
-    receiver_enabled_->setChecked(true);
-    receiver_port_ = new QLineEdit("60151", receiver_card);
-    receiver_port_->setReadOnly(true);
+    receiver_enabled_->setChecked(stored_settings.value("receiver/enabled", true).toBool());
+    receiver_port_ = new QLineEdit(
+        QString::number(stored_settings.value("receiver/listen_port", 60151).toInt()), receiver_card);
+    receiver_port_->setValidator(new QIntValidator(1, 65535, receiver_port_));
     receiver_port_->setAlignment(Qt::AlignCenter);
-    receiver_port_->setMaximumWidth(72);
+    receiver_port_->setMaximumWidth(82);
+    upstream_port_ = new QLineEdit(
+        QString::number(stored_settings.value("receiver/igv_port", 60152).toInt()), receiver_card);
+    upstream_port_->setValidator(new QIntValidator(1, 65535, upstream_port_));
+    upstream_port_->setAlignment(Qt::AlignCenter);
+    upstream_port_->setMaximumWidth(82);
+    auto* apply_receiver_ports = new QPushButton("Apply ports", receiver_card);
     receiver_status_ = new QLabel(receiver_card);
     receiver_status_->setObjectName("MutedLabel");
     receiver_controls->addWidget(receiver_enabled_);
     receiver_controls->addSpacing(16);
-    receiver_controls->addWidget(muted_label("Listen", receiver_card));
+    receiver_controls->addWidget(muted_label("Receive on 127.0.0.1", receiver_card));
     receiver_controls->addWidget(receiver_port_);
     receiver_controls->addSpacing(16);
-    receiver_controls->addWidget(muted_label("Forward to IGV · 127.0.0.1:60152", receiver_card));
+    receiver_controls->addWidget(muted_label("Send to IGV on 127.0.0.1", receiver_card));
+    receiver_controls->addWidget(upstream_port_);
     receiver_controls->addSpacing(16);
-    receiver_controls->addWidget(receiver_status_, 1);
+    receiver_controls->addWidget(apply_receiver_ports);
+    receiver_controls->addStretch(1);
     receiver_layout->addLayout(receiver_controls);
+    receiver_layout->addWidget(receiver_status_);
+    receiver_layout->addWidget(muted_label("Broadcast activity", receiver_card));
     broadcast_text_ = new QPlainTextEdit(receiver_card);
+    broadcast_text_->setReadOnly(true);
     broadcast_text_->setPlaceholderText("Received /load and /goto commands will appear here…");
+    broadcast_text_->setMinimumHeight(240);
     receiver_layout->addWidget(broadcast_text_, 1);
-    broadcast_layout->addWidget(receiver_card, 1);
+    settings_layout->addWidget(receiver_card, 1);
 
     tabs_->addTab(analysis_page, "VAF workspace");
-    tabs_->addTab(broadcast_page, "Broadcast receiver");
+    tabs_->addTab(settings_page, "Settings");
     root_layout->addWidget(tabs_);
     setCentralWidget(root);
 
@@ -563,8 +644,25 @@ MainWindow::MainWindow() {
     connect(&bam_load_watcher_, &QFutureWatcher<BamLoadBatch>::finished, this, [this] { bams_loaded(); });
     connect(&watcher_, &QFutureWatcher<MultiBamBatch>::finished, this, [this] { show_results(); });
 
+    const auto save_analysis = [this] { save_analysis_settings(); };
+    connect(minimum_mapq_, &QLineEdit::editingFinished, this, save_analysis);
+    connect(minimum_baseq_, &QLineEdit::editingFinished, this, save_analysis);
+    connect(include_duplicates_, &QCheckBox::toggled, this, save_analysis);
+    connect(include_secondary_, &QCheckBox::toggled, this, save_analysis);
+    connect(include_supplementary_, &QCheckBox::toggled, this, save_analysis);
+    connect(molecule_mode_, &QComboBox::currentIndexChanged, this, [this](const int) {
+        molecule_tag_->setEnabled(molecule_mode_->currentData().toInt() == static_cast<int>(MoleculeMode::selected_tag));
+        save_analysis_settings();
+    });
+    connect(molecule_tag_, &QLineEdit::editingFinished, this, [this] {
+        molecule_tag_->setText(molecule_tag_->text().trimmed().toUpper());
+        save_analysis_settings();
+    });
+
     command_receiver_ = new IgvCommandReceiver(this);
     connect(receiver_enabled_, &QCheckBox::toggled, this, [this](const bool enabled) { set_receiver_enabled(enabled); });
+    connect(apply_receiver_ports, &QPushButton::clicked, this,
+        [this] { set_receiver_enabled(receiver_enabled_->isChecked()); });
     connect(command_receiver_, &IgvCommandReceiver::request_received, this, [this](const QString& description) {
         append_received_command(description);
     });
@@ -572,19 +670,22 @@ MainWindow::MainWindow() {
         [this](const QStringList& paths) { enqueue_received_bams(paths); });
     connect(command_receiver_, &IgvCommandReceiver::listening_changed, this,
         [this](const bool listening, const quint16 port, const QString& error) {
-            receiver_status_->setText(listening ? QString("Listening on 127.0.0.1:%1 → IGV :60152").arg(port)
+            receiver_status_->setText(listening
+                ? QString("Listening on 127.0.0.1:%1 → IGV 127.0.0.1:%2").arg(port).arg(upstream_port_->text())
                                                 : (error.isEmpty() ? "Receiver stopped" : "Unavailable · " + error));
         });
     connect(command_receiver_, &IgvCommandReceiver::forwarding_changed, this,
         [this](const bool connected, const quint16 port, const QString& error) {
             if (connected) {
-                receiver_status_->setText(QString("Listening on 127.0.0.1:60151 → IGV :%1").arg(port));
+                receiver_status_->setText(QString("Listening on 127.0.0.1:%1 → IGV 127.0.0.1:%2")
+                    .arg(command_receiver_->port()).arg(port));
             } else {
-                receiver_status_->setText(QString("Listening on :60151 · IGV :%1 unavailable").arg(port));
+                receiver_status_->setText(QString("Listening on 127.0.0.1:%1 · IGV 127.0.0.1:%2 unavailable")
+                    .arg(command_receiver_->port()).arg(port));
                 append_received_command(QString("IGV forwarding failed on 127.0.0.1:%1\n%2").arg(port).arg(error));
             }
         });
-    set_receiver_enabled(true);
+    set_receiver_enabled(receiver_enabled_->isChecked());
 }
 
 bool MainWindow::busy() const {
@@ -632,11 +733,46 @@ void MainWindow::apply_theme() {
 }
 
 void MainWindow::set_receiver_enabled(const bool enabled) {
+    QSettings settings;
+    settings.setValue("receiver/enabled", enabled);
     if (!enabled) {
+        if (receiver_port_->hasAcceptableInput() && upstream_port_->hasAcceptableInput()
+            && receiver_port_->text().toUShort() != upstream_port_->text().toUShort()) {
+            settings.setValue("receiver/listen_port", receiver_port_->text().toUShort());
+            settings.setValue("receiver/igv_port", upstream_port_->text().toUShort());
+        }
         command_receiver_->close();
+        receiver_status_->setText("Receiver stopped");
         return;
     }
-    (void)command_receiver_->listen(60151, 60152);
+    if (!receiver_port_->hasAcceptableInput() || !upstream_port_->hasAcceptableInput()) {
+        receiver_status_->setText("Port changes not applied: enter receiving and IGV ports from 1 to 65535.");
+        return;
+    }
+    const auto receive_port = receiver_port_->text().toUShort();
+    const auto send_port = upstream_port_->text().toUShort();
+    if (receive_port == send_port) {
+        receiver_status_->setText("Port changes not applied: receiving and IGV ports must be different.");
+        return;
+    }
+    settings.setValue("receiver/listen_port", receive_port);
+    settings.setValue("receiver/igv_port", send_port);
+    (void)command_receiver_->listen(receive_port, send_port);
+}
+
+void MainWindow::save_analysis_settings() {
+    QSettings settings;
+    if (minimum_mapq_->hasAcceptableInput()) {
+        settings.setValue("analysis/minimum_mapping_quality", minimum_mapq_->text().toInt());
+    }
+    if (minimum_baseq_->hasAcceptableInput()) {
+        settings.setValue("analysis/minimum_base_quality", minimum_baseq_->text().toInt());
+    }
+    settings.setValue("analysis/include_duplicates", include_duplicates_->isChecked());
+    settings.setValue("analysis/include_secondary", include_secondary_->isChecked());
+    settings.setValue("analysis/include_supplementary", include_supplementary_->isChecked());
+    settings.setValue("analysis/molecule_mode", molecule_mode_->currentData().toInt());
+    settings.setValue("analysis/molecule_tag", molecule_tag_->text().trimmed().toUpper());
 }
 
 void MainWindow::append_received_command(const QString& description) {
@@ -891,10 +1027,14 @@ FilterSettings MainWindow::filters() const {
     FilterSettings values;
     values.minimum_mapping_quality = std::max(0, minimum_mapq_->text().toInt());
     values.minimum_base_quality = std::max(0, minimum_baseq_->text().toInt());
+    values.include_duplicates = include_duplicates_->isChecked();
+    values.include_secondary = include_secondary_->isChecked();
+    values.include_supplementary = include_supplementary_->isChecked();
     values.minimum_variant_allele_fraction = 0.0;
     values.minimum_alternate_reads = 1;
     values.minimum_alternate_molecules = 1;
-    values.molecule_mode = MoleculeMode::raw_reads;
+    values.molecule_mode = static_cast<MoleculeMode>(molecule_mode_->currentData().toInt());
+    values.molecule_tag = molecule_tag_->text().trimmed().toUpper().toStdString();
     return values;
 }
 
@@ -908,6 +1048,17 @@ void MainWindow::run_queries() {
         QMessageBox::warning(this, "Invalid quality filters", "MapQ and baseQ must be integers from 0 to 255.");
         return;
     }
+    const auto selected_tag_mode = molecule_mode_->currentData().toInt() == static_cast<int>(MoleculeMode::selected_tag);
+    const auto molecule_tag = molecule_tag_->text().trimmed();
+    if (selected_tag_mode && (molecule_tag.size() != 2 || !molecule_tag.front().isLetter()
+        || !molecule_tag.back().isLetterOrNumber())) {
+        QMessageBox::warning(this, "Invalid molecule tag",
+            "A specific BAM molecule tag must contain exactly two characters: a letter followed by a letter or number.");
+        tabs_->setCurrentIndex(1);
+        molecule_tag_->setFocus();
+        return;
+    }
+    save_analysis_settings();
     auto current_parsed = parse_queries(current_query_text_->toPlainText().toStdString());
     auto historical_parsed = parse_queries(historical_query_text_->toPlainText().toStdString());
     std::vector<VariantQuery> current_variants;

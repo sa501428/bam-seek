@@ -122,29 +122,34 @@ ReportRowParse parse_igv_report_row(const std::string& line, const std::vector<s
     }
 
     std::size_t coding_index = original_columns.size();
-    std::size_t protein_index = original_columns.size();
     for (std::size_t i = offset + 3; i < original_columns.size(); ++i) {
         if (coding_index == original_columns.size() && starts_with_case_insensitive(original_columns[i], "c.")) {
             coding_index = i;
-            continue;
-        }
-        if (coding_index != original_columns.size() && starts_with_case_insensitive(original_columns[i], "p.")) {
-            protein_index = i;
             break;
         }
     }
-    if (coding_index == original_columns.size() || protein_index == original_columns.size()) {
+    if (coding_index == original_columns.size()) {
         if (has_igv_prefix) {
             parsed.recognized = true;
-            parsed.error = "IGV report row requires c. and p. notation";
+            parsed.error = "IGV report row requires c. notation";
         }
         return parsed;
     }
 
     parsed.recognized = true;
-    if (!safe_position(one_based_position) || original_columns.size() <= protein_index + 2
+    std::size_t allele_index = coding_index + 1;
+    std::string protein_change;
+    if (allele_index < original_columns.size()
+        && starts_with_case_insensitive(original_columns[allele_index], "p.")) {
+        protein_change = original_columns[allele_index++];
+    } else if (allele_index < original_columns.size() && original_columns[allele_index].empty()) {
+        // Tabular reports retain an empty protein-change column for intronic and
+        // splice variants. Skip that placeholder without shifting REF and ALT.
+        ++allele_index;
+    }
+    if (!safe_position(one_based_position) || original_columns.size() <= allele_index + 1
         || coding_index <= offset + 3) {
-        parsed.error = "IGV report row requires chromosome, position, gene, type, c. notation, p. notation, REF, and ALT";
+        parsed.error = "IGV report row requires chromosome, position, gene, type, c. notation, REF, and ALT";
         return parsed;
     }
 
@@ -154,15 +159,15 @@ ReportRowParse parse_igv_report_row(const std::string& line, const std::vector<s
         transcript = original_columns[type_start++];
     }
     const auto variant_type = join_columns(original_columns, type_start, coding_index);
-    const auto reference = uppercase(original_columns[protein_index + 1]);
-    const auto alternate = uppercase(original_columns[protein_index + 2]);
+    const auto reference = uppercase(original_columns[allele_index]);
+    const auto alternate = uppercase(original_columns[allele_index + 1]);
     if (variant_type.empty() || !supported_alleles(reference, alternate)) {
         parsed.error = "IGV report REF/ALT is invalid; indels must include the shared left-anchor base";
         return parsed;
     }
 
     parsed.variant = VariantQuery{line, original_columns[offset], one_based_position - 1, reference, alternate,
-        original_columns[offset + 2], transcript, original_columns[coding_index], original_columns[protein_index], variant_type};
+        original_columns[offset + 2], transcript, original_columns[coding_index], protein_change, variant_type};
     return parsed;
 }
 
@@ -226,7 +231,15 @@ ParsedQueries parse_queries(const std::string& text, const std::vector<ClinicalV
         std::vector<std::string> columns;
         for (std::string column; fields >> column;) columns.push_back(column);
         if (columns.size() == 1 && uppercase(columns.front()) == "IGV") continue;
-        const auto report_row = parse_igv_report_row(line, columns);
+        // Preserve empty tab-separated fields (notably a blank protein-change
+        // column) while continuing to accept whitespace-delimited report rows.
+        auto report_columns = line.find('\t') == std::string::npos ? columns : split_tabs(line);
+        if (!report_columns.empty() && starts_with_case_insensitive(report_columns.front(), "IGV ")) {
+            const auto contig = trim(report_columns.front().substr(4));
+            report_columns.front() = "IGV";
+            report_columns.insert(report_columns.begin() + 1, contig);
+        }
+        const auto report_row = parse_igv_report_row(line, report_columns);
         if (report_row.recognized) {
             if (report_row.variant) result.queries.emplace_back(*report_row.variant);
             else if (!report_row.error.empty()) {

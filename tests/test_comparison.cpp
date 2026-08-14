@@ -53,7 +53,7 @@ int main() {
     };
     const auto narrative = bamseek::comparison_narrative(results);
     if (narrative.find("previous sample old-A.bam") == std::string::npos
-        || narrative.find("JAK2 c.1849G>T (p.V617F, 2/98 consensus reads, 1 molecule)") == std::string::npos
+        || narrative.find("JAK2 c.1849G>T (p.V617F, 2/100 consensus reads, 1 molecule)") == std::string::npos
         || narrative.find("NOTCH1 c.7330C>T (p.Q2444*, 0/75 consensus reads)") == std::string::npos
         || narrative.find("previous sample old-B.bam") == std::string::npos
         || narrative.find("previously reported TET2 c.5162T>G (p.L1721W, 0/120 consensus reads, 0 molecules) mutation") == std::string::npos

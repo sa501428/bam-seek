@@ -74,7 +74,7 @@ std::string evidence_item(const VariantEvidence& evidence, const bool force_zero
         details.push_back(evidence.query.protein_change);
     }
     details.push_back(std::to_string(force_zero_reads ? 0 : counts.alternate_reads) + '/'
-        + std::to_string(counts.reference_reads) + " consensus reads");
+        + std::to_string(counts.alternate_reads + counts.reference_reads) + " consensus reads");
     if (include_molecules) {
         const auto molecules = evidence.molecule_counts_available
             ? std::to_string(counts.alternate_molecules) : std::string("N/A");

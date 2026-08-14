@@ -13,6 +13,7 @@
 #include <vector>
 
 class QCheckBox;
+class QComboBox;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -53,6 +54,7 @@ private:
     void toggle_theme();
     void apply_theme();
     void set_receiver_enabled(bool enabled);
+    void save_analysis_settings();
     void append_received_command(const QString& description);
     [[nodiscard]] FilterSettings filters() const;
     [[nodiscard]] bool busy() const;
@@ -62,6 +64,11 @@ private:
     QLabel* bam_count_{};
     QLineEdit* minimum_mapq_{};
     QLineEdit* minimum_baseq_{};
+    QCheckBox* include_duplicates_{};
+    QCheckBox* include_secondary_{};
+    QCheckBox* include_supplementary_{};
+    QComboBox* molecule_mode_{};
+    QLineEdit* molecule_tag_{};
     QPlainTextEdit* current_query_text_{};
     QPlainTextEdit* historical_query_text_{};
     QPlainTextEdit* summary_text_{};
@@ -77,6 +84,7 @@ private:
     QPlainTextEdit* broadcast_text_{};
     QCheckBox* receiver_enabled_{};
     QLineEdit* receiver_port_{};
+    QLineEdit* upstream_port_{};
     QLabel* receiver_status_{};
     IgvCommandReceiver* command_receiver_{};
     bool dark_mode_ = true;

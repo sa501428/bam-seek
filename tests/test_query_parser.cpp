@@ -76,6 +76,26 @@ int main() {
         || tet2.transcript != "ENST00000380013.4" || tet2.variant_type != "FRAMESHIFT"
         || tet2.reference != "A" || tet2.alternate != "AT") return EXIT_FAILURE;
 
+    const auto splice_report = bamseek::parse_queries(
+        "IGV\t7\t50435881\tIKZF1\tENST00000331340.3\tINTRON\tc.161-8350A>C\t\tA\tC\tGTTCTXTTCGT\t41.6\t384\t274\t403\t0\t0.000440394\t1\t61\n"
+        "IGV X\t53448856\tSMC1A\tENST00000322213.4\tINTRON\tc.109+582_109+585delACCGinsCCCC\t\tCGGT\tGGGG\tCATAGXGGGGG\t22.8\t180\t53\t284\t0\t\t5\t8518\n");
+    if (!splice_report.errors.empty() || splice_report.queries.size() != 2) {
+        std::cerr << "Intronic report rows with blank protein changes were not parsed\n";
+        return EXIT_FAILURE;
+    }
+    const auto& ikzf1 = std::get<bamseek::VariantQuery>(splice_report.queries[0]);
+    const auto& smc1a = std::get<bamseek::VariantQuery>(splice_report.queries[1]);
+    if (ikzf1.contig != "7" || ikzf1.position != 50435880 || ikzf1.gene != "IKZF1"
+        || ikzf1.transcript != "ENST00000331340.3" || ikzf1.variant_type != "INTRON"
+        || ikzf1.coding_change != "c.161-8350A>C" || !ikzf1.protein_change.empty()
+        || ikzf1.reference != "A" || ikzf1.alternate != "C"
+        || smc1a.contig != "X" || smc1a.position != 53448855 || smc1a.gene != "SMC1A"
+        || smc1a.coding_change != "c.109+582_109+585delACCGinsCCCC" || !smc1a.protein_change.empty()
+        || smc1a.reference != "CGGT" || smc1a.alternate != "GGGG") {
+        std::cerr << "Intronic report alleles or metadata shifted columns\n";
+        return EXIT_FAILURE;
+    }
+
     const auto unanchored_report = bamseek::parse_queries(
         "IGV\t1\t100\tGENE\tFRAMESHIFT\tc.1_2insT\tp.X1fs\t-\tT\t50\n");
     if (!unanchored_report.queries.empty() || unanchored_report.errors.size() != 1) {
