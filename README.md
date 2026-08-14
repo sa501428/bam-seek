@@ -44,9 +44,9 @@ The optional mapQ and baseQ controls filter low-quality alignments and allele ob
 
 ## Broadcast receiver
 
-The **Broadcast receiver** has its own top-level tab, separate from the BAM and variant workspace. It retains the receiving side of IGV's localhost command protocol on port `60151` (or another editable port). Every received command is appended to the inbox for review. For a `GET /load` request, BAM Seek extracts only the decoded `file` value and prepares that BAM in the active BAM panel; locus, genome, index, merge, and other request fields are ignored. `/goto` and other commands do not change the analysis workspace.
+The **Broadcast receiver** has its own top-level tab, separate from the BAM and variant workspace. BAM Seek listens on `127.0.0.1:60151`, inspects every received command for the review inbox, and forwards the complete byte stream unchanged to IGV on `127.0.0.1:60152`. IGV's response is relayed unchanged to the original sender. For a `GET /load` request, BAM Seek also extracts only the decoded `file` value and prepares that BAM in the active BAM panel; locus, genome, index, merge, and other request fields do not change the analysis workspace, but are still forwarded to IGV.
 
-The listener binds only to `127.0.0.1`. IGV and BAM Seek cannot listen on the same port simultaneously, so configure a different port when both programs are running.
+Configure IGV's command listener for port `60152` in **View → Preferences → Advanced**, or launch command-line IGV with `-p 60152`. Keep callers and existing IGV links pointed at port `60151`. Both relay endpoints bind only to localhost.
 
 ## Read-only operation
 

@@ -137,25 +137,9 @@ QString describe_port_command(const QString& request_line) {
     return output.join('\n');
 }
 
-QByteArray http_response(const bool options, const bool head) {
-    if (options) {
-        return "HTTP/1.1 204 No Content\r\n"
-               "Access-Control-Allow-Origin: *\r\n"
-               "Access-Control-Allow-Headers: access-control-allow-origin\r\n"
-               "Access-Control-Allow-Private-Network: true\r\n"
-               "Access-Control-Allow-Methods: HEAD, GET, OPTIONS\r\n"
-               "Connection: close\r\n\r\n";
-    }
-    static const QByteArray body = "RECEIVED\n";
-    auto response = "HTTP/1.1 202 Accepted\r\n"
-           "Access-Control-Allow-Origin: *\r\n"
-           "Access-Control-Allow-Private-Network: true\r\n"
-           "Cache-Control: no-cache, no-store\r\n"
-           "Content-Type: text/plain; charset=utf-8\r\n"
-           "Content-Length: " + QByteArray::number(body.size()) + "\r\n"
-           "Connection: close\r\n\r\n";
-    if (!head) response += body;
-    return response;
+bool looks_like_http_request(const QString& request_line) {
+    const auto fields = request_line.simplified().split(' ');
+    return fields.size() >= 3 && fields[2].startsWith("HTTP/", Qt::CaseInsensitive);
 }
 
 }  // namespace
@@ -164,9 +148,10 @@ IgvCommandReceiver::IgvCommandReceiver(QObject* parent) : QObject(parent), serve
     connect(server_, &QTcpServer::newConnection, this, &IgvCommandReceiver::accept_connections);
 }
 
-bool IgvCommandReceiver::listen(const quint16 port) {
+bool IgvCommandReceiver::listen(const quint16 port, const quint16 upstream_port) {
     close();
-    // Match IGV's local command service while preventing access from other hosts.
+    upstream_port_ = upstream_port;
+    // Own IGV's conventional local port while preventing access from other hosts.
     const auto started = server_->listen(QHostAddress::LocalHost, port);
     emit listening_changed(started, started ? server_->serverPort() : port, started ? QString{} : server_->errorString());
     return started;
@@ -176,6 +161,7 @@ void IgvCommandReceiver::close() {
     if (!server_->isListening()) return;
     const auto old_port = server_->serverPort();
     server_->close();
+    for (auto* client : server_->findChildren<QTcpSocket*>(QString(), Qt::FindDirectChildrenOnly)) client->abort();
     emit listening_changed(false, old_port, {});
 }
 
@@ -183,14 +169,13 @@ bool IgvCommandReceiver::is_listening() const { return server_->isListening(); }
 
 quint16 IgvCommandReceiver::port() const { return server_->serverPort(); }
 
+quint16 IgvCommandReceiver::upstream_port() const noexcept { return upstream_port_; }
+
 QString IgvCommandReceiver::error_string() const { return server_->errorString(); }
 
 QString IgvCommandReceiver::describe_request(const QString& request_line) {
     const auto trimmed = request_line.trimmed();
-    if (trimmed.startsWith("GET ", Qt::CaseInsensitive) || trimmed.startsWith("HEAD ", Qt::CaseInsensitive)
-        || trimmed.startsWith("OPTIONS ", Qt::CaseInsensitive)) {
-        return describe_http(trimmed);
-    }
+    if (looks_like_http_request(trimmed)) return describe_http(trimmed);
     return describe_port_command(trimmed);
 }
 
@@ -203,57 +188,86 @@ QStringList IgvCommandReceiver::bam_paths_from_request(const QString& request_li
 void IgvCommandReceiver::accept_connections() {
     while (server_->hasPendingConnections()) {
         auto* client = server_->nextPendingConnection();
-        connect(client, &QTcpSocket::readyRead, this, [this, client] { read_client(client); });
+        auto* upstream = new QTcpSocket(client);
+        connect(client, &QTcpSocket::readyRead, client, [this, client, upstream] {
+            const auto bytes = client->readAll();
+            inspect_client_bytes(client, bytes);
+            if (!client->property("relay_failure_error").toString().isEmpty()) {
+                fail_client_relay(client);
+                return;
+            }
+            if (upstream->state() == QAbstractSocket::ConnectedState) {
+                upstream->write(bytes);
+            } else {
+                client->setProperty("pending_upstream_bytes",
+                    client->property("pending_upstream_bytes").toByteArray() + bytes);
+            }
+        });
+        connect(upstream, &QTcpSocket::connected, client, [this, client, upstream] {
+            const auto pending = client->property("pending_upstream_bytes").toByteArray();
+            client->setProperty("pending_upstream_bytes", QByteArray{});
+            if (!pending.isEmpty()) upstream->write(pending);
+            emit forwarding_changed(true, upstream_port_, {});
+        });
+        connect(upstream, &QTcpSocket::readyRead, client, [client, upstream] {
+            client->write(upstream->readAll());
+        });
+        connect(upstream, &QTcpSocket::disconnected, client, [client] {
+            client->disconnectFromHost();
+        });
+        connect(upstream, &QTcpSocket::errorOccurred, client, [this, client, upstream](const QAbstractSocket::SocketError error) {
+            if (error == QAbstractSocket::RemoteHostClosedError) return;
+            client->setProperty("relay_failure_error", upstream->errorString());
+            if (!client->property("relay_error_reported").toBool()) {
+                client->setProperty("relay_error_reported", true);
+                emit forwarding_changed(false, upstream_port_, upstream->errorString());
+            }
+            fail_client_relay(client);
+        });
+        connect(client, &QTcpSocket::disconnected, upstream, &QTcpSocket::disconnectFromHost);
         connect(client, &QTcpSocket::disconnected, client, &QObject::deleteLater);
+        upstream->connectToHost(QHostAddress::LocalHost, upstream_port_);
     }
 }
 
-void IgvCommandReceiver::read_client(QTcpSocket* client) {
-    auto buffer = client->property("request_buffer").toByteArray();
-    buffer += client->readAll();
-    if (buffer.size() > 64 * 1024) {
-        client->write("HTTP/1.1 413 Content Too Large\r\nConnection: close\r\n\r\n");
-        client->disconnectFromHost();
-        return;
-    }
-    const auto first_newline = buffer.indexOf('\n');
-    if (first_newline < 0) {
-        client->setProperty("request_buffer", buffer.left(64 * 1024));
-        return;
-    }
-
-    const auto first_line = QString::fromUtf8(buffer.left(first_newline)).trimmed();
-    const auto is_http = first_line.startsWith("GET ", Qt::CaseInsensitive)
-        || first_line.startsWith("HEAD ", Qt::CaseInsensitive)
-        || first_line.startsWith("OPTIONS ", Qt::CaseInsensitive);
-    if (is_http) {
-        if (!buffer.contains("\r\n\r\n") && !buffer.contains("\n\n")) {
-            client->setProperty("request_buffer", buffer.left(64 * 1024));
-            return;
-        }
-        if (!first_line.startsWith("OPTIONS ", Qt::CaseInsensitive)) {
-            emit request_received(describe_request(first_line));
-            const auto bams = bam_paths_from_request(first_line);
-            if (!bams.isEmpty()) emit bam_load_requested(bams);
-        }
-        client->write(http_response(first_line.startsWith("OPTIONS ", Qt::CaseInsensitive),
-            first_line.startsWith("HEAD ", Qt::CaseInsensitive)));
-        client->disconnectFromHost();
-        return;
-    }
-
+void IgvCommandReceiver::inspect_client_bytes(QTcpSocket* client, const QByteArray& bytes) {
+    if (client->property("inspection_complete").toBool()) return;
+    auto buffer = client->property("inspection_buffer").toByteArray() + bytes;
     while (true) {
         const auto newline = buffer.indexOf('\n');
         if (newline < 0) break;
         const auto line = QString::fromUtf8(buffer.left(newline)).trimmed();
         buffer.remove(0, newline + 1);
         if (line.isEmpty()) continue;
+        if (!client->property("inspection_mode_known").toBool()) {
+            const bool http = looks_like_http_request(line);
+            client->setProperty("inspection_mode_known", true);
+            client->setProperty("inspection_is_http", http);
+            if (http) client->setProperty("inspection_complete", true);
+        }
         emit request_received(describe_request(line));
         const auto bams = bam_paths_from_request(line);
         if (!bams.isEmpty()) emit bam_load_requested(bams);
-        client->write("RECEIVED\n");
+        if (client->property("inspection_is_http").toBool()) {
+            buffer.clear();
+            break;
+        }
     }
-    client->setProperty("request_buffer", buffer.left(64 * 1024));
+    client->setProperty("inspection_buffer", buffer.left(64 * 1024));
+}
+
+void IgvCommandReceiver::fail_client_relay(QTcpSocket* client) {
+    if (!client->property("inspection_mode_known").toBool()
+        || client->property("relay_failure_response_sent").toBool()) return;
+    client->setProperty("relay_failure_response_sent", true);
+    if (client->property("inspection_is_http").toBool()) {
+        static const QByteArray body = "IGV relay unavailable\n";
+        client->write("HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: "
+            + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+    } else {
+        client->write("ERROR IGV relay unavailable\n");
+    }
+    client->disconnectFromHost();
 }
 
 }  // namespace bamseek

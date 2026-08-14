@@ -532,15 +532,17 @@ MainWindow::MainWindow() {
     receiver_enabled_ = new QCheckBox("Receiver enabled", receiver_card);
     receiver_enabled_->setChecked(true);
     receiver_port_ = new QLineEdit("60151", receiver_card);
-    receiver_port_->setValidator(new QIntValidator(1024, 65535, receiver_port_));
+    receiver_port_->setReadOnly(true);
     receiver_port_->setAlignment(Qt::AlignCenter);
-    receiver_port_->setMaximumWidth(88);
+    receiver_port_->setMaximumWidth(72);
     receiver_status_ = new QLabel(receiver_card);
     receiver_status_->setObjectName("MutedLabel");
     receiver_controls->addWidget(receiver_enabled_);
     receiver_controls->addSpacing(16);
-    receiver_controls->addWidget(muted_label("Port", receiver_card));
+    receiver_controls->addWidget(muted_label("Listen", receiver_card));
     receiver_controls->addWidget(receiver_port_);
+    receiver_controls->addSpacing(16);
+    receiver_controls->addWidget(muted_label("Forward to IGV · 127.0.0.1:60152", receiver_card));
     receiver_controls->addSpacing(16);
     receiver_controls->addWidget(receiver_status_, 1);
     receiver_layout->addLayout(receiver_controls);
@@ -570,9 +572,6 @@ MainWindow::MainWindow() {
 
     command_receiver_ = new IgvCommandReceiver(this);
     connect(receiver_enabled_, &QCheckBox::toggled, this, [this](const bool enabled) { set_receiver_enabled(enabled); });
-    connect(receiver_port_, &QLineEdit::editingFinished, this, [this] {
-        if (receiver_enabled_->isChecked()) set_receiver_enabled(true);
-    });
     connect(command_receiver_, &IgvCommandReceiver::request_received, this, [this](const QString& description) {
         append_received_command(description);
     });
@@ -580,8 +579,17 @@ MainWindow::MainWindow() {
         [this](const QStringList& paths) { enqueue_received_bams(paths); });
     connect(command_receiver_, &IgvCommandReceiver::listening_changed, this,
         [this](const bool listening, const quint16 port, const QString& error) {
-            receiver_status_->setText(listening ? QString("Listening on 127.0.0.1:%1").arg(port)
+            receiver_status_->setText(listening ? QString("Listening on 127.0.0.1:%1 → IGV :60152").arg(port)
                                                 : (error.isEmpty() ? "Receiver stopped" : "Unavailable · " + error));
+        });
+    connect(command_receiver_, &IgvCommandReceiver::forwarding_changed, this,
+        [this](const bool connected, const quint16 port, const QString& error) {
+            if (connected) {
+                receiver_status_->setText(QString("Listening on 127.0.0.1:60151 → IGV :%1").arg(port));
+            } else {
+                receiver_status_->setText(QString("Listening on :60151 · IGV :%1 unavailable").arg(port));
+                append_received_command(QString("IGV forwarding failed on 127.0.0.1:%1\n%2").arg(port).arg(error));
+            }
         });
     set_receiver_enabled(true);
 }
@@ -635,12 +643,7 @@ void MainWindow::set_receiver_enabled(const bool enabled) {
         command_receiver_->close();
         return;
     }
-    if (!receiver_port_->hasAcceptableInput()) {
-        command_receiver_->close();
-        receiver_status_->setText("Enter a port from 1024 to 65535");
-        return;
-    }
-    (void)command_receiver_->listen(receiver_port_->text().toUShort());
+    (void)command_receiver_->listen(60151, 60152);
 }
 
 void MainWindow::append_received_command(const QString& description) {
