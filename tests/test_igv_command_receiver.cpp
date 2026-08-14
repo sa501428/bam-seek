@@ -38,5 +38,26 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
+    const auto intercepted = bamseek::IgvCommandReceiver::bam_paths_from_request(
+        "GET /load?file=/path/to/XYZ_consensus_filtered.bam&genome=hg19"
+        "&locus=chr13:28608000-28608400&merge=false HTTP/1.1");
+    if (intercepted != QStringList{"/path/to/XYZ_consensus_filtered.bam"}) {
+        std::cerr << "Receiver did not isolate the /load file value\n";
+        return EXIT_FAILURE;
+    }
+    if (!bamseek::IgvCommandReceiver::bam_paths_from_request(
+            "GET /goto?file=%2Fpath%2Fto%2Fignored.bam&locus=chr13%3A1-2 HTTP/1.1").isEmpty()
+        || !bamseek::IgvCommandReceiver::bam_paths_from_request(
+            "HEAD /load?file=%2Fpath%2Fto%2Fignored.bam HTTP/1.1").isEmpty()) {
+        std::cerr << "Only actionable GET /load requests may emit BAM paths\n";
+        return EXIT_FAILURE;
+    }
+    const auto file_uri = bamseek::IgvCommandReceiver::bam_paths_from_request(
+        "load file=file:///data/sample%20one.bam genome=hg19 locus=chr1:10-20");
+    if (file_uri != QStringList{"/data/sample one.bam"}) {
+        std::cerr << "Receiver did not normalize a local file URI\n";
+        return EXIT_FAILURE;
+    }
+
     return EXIT_SUCCESS;
 }

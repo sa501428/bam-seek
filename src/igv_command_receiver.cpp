@@ -7,6 +7,8 @@
 #include <QUrl>
 #include <QUrlQuery>
 
+#include <utility>
+
 namespace bamseek {
 namespace {
 
@@ -29,6 +31,44 @@ void append_value(QStringList& output, const QString& label, const QString& valu
 QString last_query_value(const QUrlQuery& query, const QString& key) {
     const auto values = query.allQueryItemValues(key, QUrl::FullyDecoded);
     return values.isEmpty() ? QString{} : values.back();
+}
+
+QString normalized_file(QString value) {
+    value = decoded(std::move(value)).trimmed();
+    const QUrl url(value);
+    if (url.isLocalFile()) return url.toLocalFile();
+    return value;
+}
+
+QStringList split_file_paths(const QString& value) {
+    QStringList paths;
+    for (const auto& part : decoded(value).split(',', Qt::SkipEmptyParts)) {
+        const auto path = normalized_file(part);
+        if (!path.isEmpty() && !paths.contains(path)) paths.append(path);
+    }
+    return paths;
+}
+
+QStringList load_files_from_http(const QString& request_line) {
+    const auto fields = request_line.simplified().split(' ');
+    if (fields.size() < 2 || fields.front().compare("GET", Qt::CaseInsensitive) != 0) return {};
+    const QUrl target(fields[1]);
+    if (target.path().compare("/load", Qt::CaseInsensitive) != 0) return {};
+    return split_file_paths(last_query_value(QUrlQuery(target), "file"));
+}
+
+QStringList load_files_from_port_command(const QString& request_line) {
+    const auto arguments = QProcess::splitCommand(request_line);
+    if (arguments.isEmpty() || arguments.front().compare("load", Qt::CaseInsensitive) != 0) return {};
+    QStringList paths;
+    for (int index = 1; index < arguments.size(); ++index) {
+        const auto& argument = arguments[index];
+        const auto separator = argument.indexOf('=');
+        if (separator > 0 && argument.left(separator).compare("file", Qt::CaseInsensitive) != 0) continue;
+        const auto value = separator > 0 ? argument.mid(separator + 1) : argument;
+        for (const auto& path : split_file_paths(value)) if (!paths.contains(path)) paths.append(path);
+    }
+    return paths;
 }
 
 void append_list_value(QStringList& output, const QString& label, const QString& value) {
@@ -106,7 +146,7 @@ QByteArray http_response(const bool options, const bool head) {
                "Access-Control-Allow-Methods: HEAD, GET, OPTIONS\r\n"
                "Connection: close\r\n\r\n";
     }
-    static const QByteArray body = "RECEIVED (passive)\n";
+    static const QByteArray body = "RECEIVED\n";
     auto response = "HTTP/1.1 202 Accepted\r\n"
            "Access-Control-Allow-Origin: *\r\n"
            "Access-Control-Allow-Private-Network: true\r\n"
@@ -154,6 +194,12 @@ QString IgvCommandReceiver::describe_request(const QString& request_line) {
     return describe_port_command(trimmed);
 }
 
+QStringList IgvCommandReceiver::bam_paths_from_request(const QString& request_line) {
+    const auto trimmed = request_line.trimmed();
+    if (trimmed.startsWith("GET ", Qt::CaseInsensitive)) return load_files_from_http(trimmed);
+    return load_files_from_port_command(trimmed);
+}
+
 void IgvCommandReceiver::accept_connections() {
     while (server_->hasPendingConnections()) {
         auto* client = server_->nextPendingConnection();
@@ -185,7 +231,11 @@ void IgvCommandReceiver::read_client(QTcpSocket* client) {
             client->setProperty("request_buffer", buffer.left(64 * 1024));
             return;
         }
-        if (!first_line.startsWith("OPTIONS ", Qt::CaseInsensitive)) emit request_received(describe_request(first_line));
+        if (!first_line.startsWith("OPTIONS ", Qt::CaseInsensitive)) {
+            emit request_received(describe_request(first_line));
+            const auto bams = bam_paths_from_request(first_line);
+            if (!bams.isEmpty()) emit bam_load_requested(bams);
+        }
         client->write(http_response(first_line.startsWith("OPTIONS ", Qt::CaseInsensitive),
             first_line.startsWith("HEAD ", Qt::CaseInsensitive)));
         client->disconnectFromHost();
@@ -199,7 +249,9 @@ void IgvCommandReceiver::read_client(QTcpSocket* client) {
         buffer.remove(0, newline + 1);
         if (line.isEmpty()) continue;
         emit request_received(describe_request(line));
-        client->write("RECEIVED (passive)\n");
+        const auto bams = bam_paths_from_request(line);
+        if (!bams.isEmpty()) emit bam_load_requested(bams);
+        client->write("RECEIVED\n");
     }
     client->setProperty("request_buffer", buffer.left(64 * 1024));
 }

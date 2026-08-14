@@ -31,6 +31,7 @@
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTabBar>
+#include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -542,6 +543,8 @@ MainWindow::MainWindow() {
     connect(command_receiver_, &IgvCommandReceiver::request_received, this, [this](const QString& description) {
         append_received_command(description);
     });
+    connect(command_receiver_, &IgvCommandReceiver::bam_load_requested, this,
+        [this](const QStringList& paths) { enqueue_received_bams(paths); });
     connect(command_receiver_, &IgvCommandReceiver::listening_changed, this,
         [this](const bool listening, const quint16 port, const QString& error) {
             receiver_status_->setText(listening ? QString("Listening on 127.0.0.1:%1").arg(port)
@@ -630,6 +633,11 @@ void MainWindow::load_bams() {
         QMessageBox::information(this, "No BAM sources", "Add local BAM paths or HTTPS BAM URLs first.");
         return;
     }
+    start_bam_preparation(pending, true);
+}
+
+void MainWindow::start_bam_preparation(const QStringList& pending, const bool clear_manual_input) {
+    if (busy() || pending.isEmpty()) return;
 
     QStringList candidates;
     QStringList candidate_indexes;
@@ -669,6 +677,8 @@ void MainWindow::load_bams() {
     run_button_->setEnabled(false);
     remove_bams_button_->setEnabled(false);
     clear_bams_button_->setEnabled(false);
+    clear_bam_input_after_load_ = clear_manual_input;
+    preparing_bam_paths_ = candidates;
     status_->setText(QString("Preparing %1 BAM source(s) in the background…").arg(candidates.size()));
     bam_load_watcher_.setFuture(QtConcurrent::run([candidates, candidate_indexes, issues = std::move(issues)]() mutable {
         BamLoadBatch loaded;
@@ -693,13 +703,14 @@ void MainWindow::load_bams() {
 
 void MainWindow::bams_loaded() {
     const auto loaded = bam_load_watcher_.result();
+    preparing_bam_paths_.clear();
     for (qsizetype i = 0; i < loaded.bams.size(); ++i) {
         loaded_bam_paths_.append(loaded.bams[i]);
         loaded_index_paths_.append(loaded.indexes[i]);
         loaded_engines_.push_back(loaded.engines[static_cast<std::size_t>(i)]);
     }
     if (!loaded.bams.isEmpty()) {
-        bam_path_->clear();
+        if (clear_bam_input_after_load_) bam_path_->clear();
         last_batch_ = {};
         result_bam_paths_.clear();
         results_->setRowCount(0);
@@ -712,6 +723,32 @@ void MainWindow::bams_loaded() {
     refresh_loaded_bams();
     status_->setText(QString("%1 BAM(s) ready. No VAF calculation has run yet.").arg(loaded_bam_paths_.size()));
     if (!loaded.issues.isEmpty()) QMessageBox::warning(this, "BAM preparation notes", loaded.issues.join('\n'));
+    clear_bam_input_after_load_ = false;
+    if (!queued_receiver_bams_.isEmpty()) {
+        QTimer::singleShot(0, this, [this] { load_queued_receiver_bams(); });
+    }
+}
+
+void MainWindow::enqueue_received_bams(const QStringList& paths) {
+    for (auto path : paths) {
+        path = path.trimmed();
+        if (path.isEmpty() || loaded_bam_paths_.contains(path) || preparing_bam_paths_.contains(path)
+            || queued_receiver_bams_.contains(path)) continue;
+        queued_receiver_bams_.append(path);
+    }
+    if (queued_receiver_bams_.isEmpty()) return;
+    if (busy()) {
+        status_->setText(QString("%1 receiver BAM(s) queued for preparation.").arg(queued_receiver_bams_.size()));
+        return;
+    }
+    load_queued_receiver_bams();
+}
+
+void MainWindow::load_queued_receiver_bams() {
+    if (busy() || queued_receiver_bams_.isEmpty()) return;
+    const auto pending = queued_receiver_bams_;
+    queued_receiver_bams_.clear();
+    start_bam_preparation(pending, false);
 }
 
 void MainWindow::remove_selected_bams() {
@@ -877,6 +914,9 @@ void MainWindow::show_results() {
     } else {
         summary_text_->setPlainText(issue_text.trimmed());
         copy_summary_button_->setEnabled(!issue_text.trimmed().isEmpty());
+    }
+    if (!queued_receiver_bams_.isEmpty()) {
+        QTimer::singleShot(0, this, [this] { load_queued_receiver_bams(); });
     }
 }
 

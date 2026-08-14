@@ -34,7 +34,10 @@ protected:
 private:
     void choose_bams();
     void load_bams();
+    void start_bam_preparation(const QStringList& pending, bool clear_manual_input);
     void bams_loaded();
+    void enqueue_received_bams(const QStringList& paths);
+    void load_queued_receiver_bams();
     void remove_selected_bams();
     void clear_loaded_bams();
     void refresh_loaded_bams();
@@ -76,8 +79,11 @@ private:
     FilterSettings last_filters_;
     QStringList loaded_bam_paths_;
     QStringList loaded_index_paths_;
+    QStringList preparing_bam_paths_;
+    QStringList queued_receiver_bams_;
     std::vector<std::shared_ptr<EvidenceEngine>> loaded_engines_;
     QStringList result_bam_paths_;
+    bool clear_bam_input_after_load_ = false;
 
     struct BamLoadBatch {
         QStringList bams;
