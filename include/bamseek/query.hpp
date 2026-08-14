@@ -19,6 +19,7 @@ struct VariantQuery {
     std::string transcript;
     std::string coding_change;
     std::string protein_change;
+    std::string variant_type;
 
     [[nodiscard]] igv::GenomicInterval query_window(std::int64_t padding = 8) const;
 };

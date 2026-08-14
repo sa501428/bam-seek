@@ -18,6 +18,7 @@ if(NOT TARGET igv::igv)
 endif()
 
 add_library(bam_seek_core
+    src/comparison.cpp
     src/evidence_engine.cpp
     src/query_parser.cpp
 )
@@ -71,6 +72,10 @@ if(BAM_SEEK_BUILD_GUI)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(bam_seek_comparison_tests tests/test_comparison.cpp)
+    target_link_libraries(bam_seek_comparison_tests PRIVATE bamseek::core)
+    add_test(NAME bam_seek_comparison_tests COMMAND bam_seek_comparison_tests)
+
     add_executable(bam_seek_tests tests/test_query_parser.cpp)
     target_link_libraries(bam_seek_tests PRIVATE bamseek::core)
     target_compile_definitions(bam_seek_tests PRIVATE

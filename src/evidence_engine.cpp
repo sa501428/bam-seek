@@ -529,7 +529,7 @@ BatchEvidence EvidenceEngine::evaluate(const std::vector<Query>& queries, const 
                     for (const auto& [alternate_base, preliminary_count] : observed) {
                         if (preliminary_count < filters.minimum_alternate_reads) continue;
                         auto candidate = evaluate_variant(*reader_, {region->source_text, region->interval.contig, position,
-                                                                      std::string(1, reference_base), std::string(1, alternate_base), {}, {}, {}, {}}, filters);
+                                                                      std::string(1, reference_base), std::string(1, alternate_base), {}, {}, {}, {}, {}}, filters);
                         if (!candidate.passes_thresholds) continue;
                         if (region_evidence.candidates.size() == maximum_region_candidates) {
                             truncated = true;

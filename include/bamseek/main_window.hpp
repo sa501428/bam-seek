@@ -1,6 +1,6 @@
 #pragma once
 
-#include <bamseek/evidence.hpp>
+#include <bamseek/comparison.hpp>
 
 #include <QFutureWatcher>
 #include <QMainWindow>
@@ -14,6 +14,7 @@ class QCheckBox;
 class QLabel;
 class QLineEdit;
 class QListWidget;
+class QListWidgetItem;
 class QPlainTextEdit;
 class QPushButton;
 class QTableWidget;
@@ -41,9 +42,10 @@ private:
     void remove_selected_bams();
     void clear_loaded_bams();
     void refresh_loaded_bams();
+    void set_current_bam(QListWidgetItem* changed_item);
+    void clear_results();
     void run_queries();
     void show_results();
-    void show_result_summary(int row, int column = 0);
     void copy_summary();
     void toggle_theme();
     void apply_theme();
@@ -57,7 +59,8 @@ private:
     QLabel* bam_count_{};
     QLineEdit* minimum_mapq_{};
     QLineEdit* minimum_baseq_{};
-    QPlainTextEdit* query_text_{};
+    QPlainTextEdit* current_query_text_{};
+    QPlainTextEdit* historical_query_text_{};
     QPlainTextEdit* summary_text_{};
     QTableWidget* results_{};
     QTabWidget* tabs_{};
@@ -81,9 +84,12 @@ private:
     QStringList loaded_index_paths_;
     QStringList preparing_bam_paths_;
     QStringList queued_receiver_bams_;
+    QString current_bam_path_;
     std::vector<std::shared_ptr<EvidenceEngine>> loaded_engines_;
     QStringList result_bam_paths_;
+    std::vector<VariantOrigin> result_variant_origins_;
     bool clear_bam_input_after_load_ = false;
+    bool refreshing_bam_list_ = false;
 
     struct BamLoadBatch {
         QStringList bams;
@@ -96,6 +102,7 @@ private:
     struct MultiBamBatch {
         BatchEvidence batch;
         QStringList result_bams;
+        std::vector<VariantOrigin> result_variant_origins;
     };
     QFutureWatcher<MultiBamBatch> watcher_;
 };

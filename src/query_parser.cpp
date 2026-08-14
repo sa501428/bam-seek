@@ -71,6 +71,101 @@ std::string join_columns(const std::vector<std::string>& columns, const std::siz
     return joined;
 }
 
+std::string join_columns(const std::vector<std::string>& columns, const std::size_t start, const std::size_t end) {
+    std::string joined;
+    for (std::size_t i = start; i < end; ++i) {
+        if (!joined.empty()) joined += ' ';
+        joined += columns[i];
+    }
+    return joined;
+}
+
+bool starts_with_case_insensitive(const std::string& value, const std::string_view prefix) {
+    if (value.size() < prefix.size()) return false;
+    for (std::size_t i = 0; i < prefix.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(value[i]))
+            != std::tolower(static_cast<unsigned char>(prefix[i]))) return false;
+    }
+    return true;
+}
+
+bool looks_like_transcript(const std::string& value) {
+    const auto upper = uppercase(value);
+    return upper.starts_with("ENST") || upper.starts_with("ENSMUST") || upper.starts_with("NM_")
+        || upper.starts_with("NR_") || upper.starts_with("XM_") || upper.starts_with("XR_")
+        || upper.starts_with("LRG_");
+}
+
+struct ReportRowParse {
+    bool recognized = false;
+    std::optional<VariantQuery> variant;
+    std::string error;
+};
+
+ReportRowParse parse_igv_report_row(const std::string& line, const std::vector<std::string>& original_columns) {
+    ReportRowParse parsed;
+    if (original_columns.empty()) return parsed;
+    const bool has_igv_prefix = uppercase(original_columns.front()) == "IGV";
+    const std::size_t offset = has_igv_prefix ? 1 : 0;
+    if (original_columns.size() <= offset + 1) {
+        parsed.recognized = has_igv_prefix;
+        return parsed;
+    }
+
+    std::int64_t one_based_position{};
+    if (!parse_positive(original_columns[offset + 1], one_based_position)) {
+        if (has_igv_prefix) {
+            parsed.recognized = true;
+            parsed.error = "IGV report row has an invalid genomic position";
+        }
+        return parsed;
+    }
+
+    std::size_t coding_index = original_columns.size();
+    std::size_t protein_index = original_columns.size();
+    for (std::size_t i = offset + 3; i < original_columns.size(); ++i) {
+        if (coding_index == original_columns.size() && starts_with_case_insensitive(original_columns[i], "c.")) {
+            coding_index = i;
+            continue;
+        }
+        if (coding_index != original_columns.size() && starts_with_case_insensitive(original_columns[i], "p.")) {
+            protein_index = i;
+            break;
+        }
+    }
+    if (coding_index == original_columns.size() || protein_index == original_columns.size()) {
+        if (has_igv_prefix) {
+            parsed.recognized = true;
+            parsed.error = "IGV report row requires c. and p. notation";
+        }
+        return parsed;
+    }
+
+    parsed.recognized = true;
+    if (!safe_position(one_based_position) || original_columns.size() <= protein_index + 2
+        || coding_index <= offset + 3) {
+        parsed.error = "IGV report row requires chromosome, position, gene, type, c. notation, p. notation, REF, and ALT";
+        return parsed;
+    }
+
+    std::size_t type_start = offset + 3;
+    std::string transcript;
+    if (type_start < coding_index && looks_like_transcript(original_columns[type_start])) {
+        transcript = original_columns[type_start++];
+    }
+    const auto variant_type = join_columns(original_columns, type_start, coding_index);
+    const auto reference = uppercase(original_columns[protein_index + 1]);
+    const auto alternate = uppercase(original_columns[protein_index + 2]);
+    if (variant_type.empty() || !supported_alleles(reference, alternate)) {
+        parsed.error = "IGV report REF/ALT is invalid; indels must include the shared left-anchor base";
+        return parsed;
+    }
+
+    parsed.variant = VariantQuery{line, original_columns[offset], one_based_position - 1, reference, alternate,
+        original_columns[offset + 2], transcript, original_columns[coding_index], original_columns[protein_index], variant_type};
+    return parsed;
+}
+
 struct ClinicalInput {
     std::string gene;
     std::string transcript;
@@ -130,6 +225,15 @@ ParsedQueries parse_queries(const std::string& text, const std::vector<ClinicalV
         std::istringstream fields(line);
         std::vector<std::string> columns;
         for (std::string column; fields >> column;) columns.push_back(column);
+        if (columns.size() == 1 && uppercase(columns.front()) == "IGV") continue;
+        const auto report_row = parse_igv_report_row(line, columns);
+        if (report_row.recognized) {
+            if (report_row.variant) result.queries.emplace_back(*report_row.variant);
+            else if (!report_row.error.empty()) {
+                result.errors.push_back("Line " + std::to_string(line_number) + ": " + report_row.error);
+            }
+            continue;
+        }
         const auto genomic_hgvs = line.find(":g.");
         if (columns.size() == 1 && genomic_hgvs != std::string::npos) {
             const auto contig = line.substr(0, genomic_hgvs);
@@ -148,7 +252,7 @@ ParsedQueries parse_queries(const std::string& text, const std::vector<ClinicalV
                 result.errors.push_back("Line " + std::to_string(line_number) + ": unsupported genomic HGVS allele");
                 continue;
             }
-            result.queries.emplace_back(VariantQuery{line, contig, one_based_position - 1, reference, alternate, {}, {}, {}, {}});
+            result.queries.emplace_back(VariantQuery{line, contig, one_based_position - 1, reference, alternate, {}, {}, {}, {}, {}});
             continue;
         }
         if (const auto clinical = parse_clinical_prefix(columns)) {
@@ -176,7 +280,7 @@ ParsedQueries parse_queries(const std::string& text, const std::vector<ClinicalV
                 const auto& mapping = *matches.front();
                 result.queries.emplace_back(VariantQuery{line, mapping.contig, mapping.position, mapping.reference, mapping.alternate,
                     clinical->gene, clinical->transcript.empty() ? mapping.transcript : clinical->transcript,
-                    clinical->coding_change, clinical->protein_change.empty() ? mapping.protein_change : clinical->protein_change});
+                    clinical->coding_change, clinical->protein_change.empty() ? mapping.protein_change : clinical->protein_change, {}});
             } else if (matches.empty()) {
                 result.errors.push_back("Line " + std::to_string(line_number)
                     + ": clinical-only notation cannot be resolved in the BAM VAF workflow; include the genomic coordinate and REF>ALT allele");
@@ -198,7 +302,7 @@ ParsedQueries parse_queries(const std::string& text, const std::vector<ClinicalV
             if (!parse_positive(position_text, one_based_position) || !safe_position(one_based_position) || !supported_alleles(reference, alternate)) {
                 result.errors.push_back("Line " + std::to_string(line_number) + ": invalid variant (small indels must be left-anchored)");
             } else {
-                result.queries.emplace_back(VariantQuery{line, contig, one_based_position - 1, reference, alternate, {}, {}, {}, {}});
+                result.queries.emplace_back(VariantQuery{line, contig, one_based_position - 1, reference, alternate, {}, {}, {}, {}, {}});
             }
             continue;
         }
@@ -227,7 +331,7 @@ ParsedQueries parse_queries(const std::string& text, const std::vector<ClinicalV
                 result.errors.push_back("Line " + std::to_string(line_number) + ": invalid variant (small indels must be left-anchored)");
                 continue;
             }
-            result.queries.emplace_back(VariantQuery{line, contig, one_based_position - 1, reference, alternate, {}, {}, {}, {}});
+            result.queries.emplace_back(VariantQuery{line, contig, one_based_position - 1, reference, alternate, {}, {}, {}, {}, {}});
             continue;
         }
         const auto dash = payload.find('-');

@@ -6,10 +6,10 @@ The workspace supports persistent light and dark appearances through the small t
 
 ## Workflow
 
-1. Add, remove, or clear local and HTTPS BAMs in the dedicated **BAM sources** panel.
+1. Add, remove, or clear local and HTTPS BAMs in the dedicated **BAM sources** panel. Check at most one prepared BAM to designate it as the **Current** sample; every unchecked BAM is **Historical**. If none is checked, all BAMs are historical.
 2. BAMs are prepared asynchronously when added: BAM Seek opens the alignment, reads its header, and loads its index so later queries start quickly. It does not calculate read or molecule evidence until **Calculate VAFs** is clicked.
 3. For local BAMs, BAM Seek automatically looks beside each file for a `.bai` or `.csi` index. For HTTPS BAMs, the reader performs conventional remote index discovery. There is no manual index field and the application does not create or modify indexes.
-4. Enter one variant per line in the dedicated **Variants** panel using any of these forms:
+4. Enter one variant per line in either the **Current variants** or **Historical variants** box using any of these forms:
 
 ```text
 chr7:140453136 A>T
@@ -17,9 +17,15 @@ chr7:g.140453136A>T
 chr7 140453136 A T
 chr7 140453136 . A T
 BRAF c.1799T>A p.V600E chr7:140453136 A>T
+IGV 9 139390861 NOTCH1 stop_gained c.7330C>T p.Q2444* G A 3.1
+5 176943930 DDX41 ENST00000507955.1 MISSENSE c.17C>T p.P6L G A GTTCGXGTTCC 4.4 19 45
 ```
 
 Coordinates are one-based. Clinical labels may be included for display, but must be accompanied by a genomic coordinate and REF/ALT allele; BAM Seek does not use a clinical-mapping table or a reference FASTA.
+
+For report-style rows, `IGV` may be at the start of the row, on a separate line, or omitted. An optional transcript column is recognized before the variant type. BAM Seek extracts chromosome, position, gene, type, coding change, protein change, REF, and ALT, and ignores every trailing column—including a previously reported VAF. Insertions, deletions, and duplications must use left-anchored REF/ALT alleles: the position is the shared normal anchor base, and the inserted or deleted sequence follows it.
+
+Repeated variants are evaluated once. BAM Seek considers annotations duplicates when their gene matches and either their coding or protein notation matches; unannotated genomic inputs fall back to chromosome, position, REF, and ALT. A variant entered in both boxes is labeled **Both** in the results and excluded from the comparison narrative.
 
 Each BAM and variant receives a separate result row containing:
 
@@ -28,7 +34,9 @@ Each BAM and variant receives a separate result row containing:
 - ALT molecule count and informative molecule depth
 - molecule VAF: `ALT molecules / (REF molecules + ALT molecules)`
 - OTHER/N reads and ambiguous paired fragments, which are reported but excluded from the VAF denominators
-- a concise result paragraph that can be copied to the clipboard
+- a copy-ready current-versus-historical comparison narrative
+
+The evidence table labels BAM and variant roles with separate colors, displays compact BAM filenames with the complete source in a tooltip, places a selected current BAM first, and otherwise sorts BAMs and variants alphabetically. The copy-ready comparison narrative evaluates current-only variants against every historical BAM, separates molecularly detected and absent variants, and evaluates historical-only variants against the current BAM when one is selected.
 
 Molecules are paired fragments, not UMI families. Alignments with the same read name are grouped together, and a REF or ALT molecule call requires an unambiguous majority among that fragment's callable alignments. Ties and conflicting calls are counted as ambiguous molecules.
 

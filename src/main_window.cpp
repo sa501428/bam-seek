@@ -11,6 +11,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFontDatabase>
+#include <QFontMetrics>
 #include <QFrame>
 #include <QFuture>
 #include <QHBoxLayout>
@@ -49,6 +50,7 @@ QString display_query(const VariantQuery& query) {
         + QString::fromStdString(query.reference) + '>' + QString::fromStdString(query.alternate);
     if (query.gene.empty()) return genomic;
     QString clinical = QString::fromStdString(query.gene);
+    if (!query.variant_type.empty()) clinical += ' ' + QString::fromStdString(query.variant_type);
     if (!query.coding_change.empty()) {
         clinical += ' ';
         if (!query.transcript.empty()) clinical += QString::fromStdString(query.transcript) + ':';
@@ -115,23 +117,21 @@ QString percent(const double fraction) {
     return QString::number(fraction * 100.0, 'f', 3) + '%';
 }
 
-QString evidence_summary(const VariantEvidence& evidence, const QString& bam_label) {
-    const auto& counts = evidence.counts;
-    return QString("In %1, %2 was supported by %3 of %4 informative reads (VAF %5; %6 REF and %7 OTHER/N reads). "
-                   "After collapsing reads with the same read name into paired fragments, %8 of %9 informative molecules supported the variant "
-                   "(molecule VAF %10; %11 ambiguous fragments). ALT support included %12 forward and %13 reverse reads.")
-        .arg(bam_label, display_query(evidence.query))
-        .arg(counts.alternate_reads)
-        .arg(counts.informative_read_depth())
-        .arg(percent(counts.allele_fraction()))
-        .arg(counts.reference_reads)
-        .arg(counts.other_reads)
-        .arg(evidence.molecule_counts_available ? QString::number(counts.alternate_molecules) : "N/A")
-        .arg(evidence.molecule_counts_available ? QString::number(counts.molecule_depth()) : "N/A")
-        .arg(evidence.molecule_counts_available ? percent(counts.molecule_allele_fraction()) : "unavailable")
-        .arg(evidence.molecule_counts_available ? QString::number(counts.other_molecules) : "N/A")
-        .arg(counts.alternate_forward_reads)
-        .arg(counts.alternate_reverse_reads);
+QString variant_origin_label(const VariantOrigin origin) {
+    if (origin == VariantOrigin::current) return "Current";
+    if (origin == VariantOrigin::historical) return "Historical";
+    return "Both";
+}
+
+QString compact_resource_label(const QString& path, const QFont& font) {
+    return QFontMetrics(font).elidedText(resource_label(path), Qt::ElideMiddle, 176);
+}
+
+VariantOrigin origin_for(const VariantQuery& query, const std::vector<ClassifiedVariant>& variants) {
+    const auto found = std::find_if(variants.begin(), variants.end(), [&](const auto& candidate) {
+        return candidate.query.source_text == query.source_text;
+    });
+    return found == variants.end() ? VariantOrigin::current : found->origin;
 }
 
 QLabel* section_title(const QString& text, QWidget* parent) {
@@ -144,6 +144,12 @@ QLabel* muted_label(const QString& text, QWidget* parent) {
     auto* label = new QLabel(text, parent);
     label->setObjectName("MutedLabel");
     label->setWordWrap(true);
+    return label;
+}
+
+QLabel* role_label(const QString& text, const char* object_name, QWidget* parent) {
+    auto* label = new QLabel(text, parent);
+    label->setObjectName(object_name);
     return label;
 }
 
@@ -197,6 +203,13 @@ QLabel#Pill {
     padding: 3px 10px;
     font-weight: 600;
 }
+QLabel#CurrentRole, QLabel#HistoricalRole {
+    border-radius: 8px;
+    padding: 3px 9px;
+    font-weight: 650;
+}
+QLabel#CurrentRole { color: @CURRENT_TEXT@; background: @CURRENT_BG@; border: 1px solid @CURRENT_BORDER@; }
+QLabel#HistoricalRole { color: @HISTORY_TEXT@; background: @HISTORY_BG@; border: 1px solid @HISTORY_BORDER@; }
 QPlainTextEdit, QLineEdit, QListWidget, QTableWidget {
     background: @FIELD@;
     color: @TEXT@;
@@ -281,6 +294,12 @@ QToolTip { color: @TOOLTIP_TEXT@; background: @TOOLTIP_BG@; border: 1px solid @T
     replace("@PILL_TEXT@", "#b9afff", "#5b48d6", dark);
     replace("@PILL_BG@", "#211d43", "#eeebff", dark);
     replace("@PILL_BORDER@", "#39316d", "#d5ceff", dark);
+    replace("@CURRENT_TEXT@", "#c8c1ff", "#5541c8", dark);
+    replace("@CURRENT_BG@", "#28234f", "#efedff", dark);
+    replace("@CURRENT_BORDER@", "#4a4084", "#d5ceff", dark);
+    replace("@HISTORY_TEXT@", "#8fddd2", "#087568", dark);
+    replace("@HISTORY_BG@", "#102f31", "#e5f7f4", dark);
+    replace("@HISTORY_BORDER@", "#245254", "#b9e4de", dark);
     replace("@FIELD@", "#0c121c", "#f8fafc", dark);
     replace("@FIELD_BORDER@", "#273244", "#ccd5e1", dark);
     replace("@SELECT@", "#5146a8", "#dcd8ff", dark);
@@ -316,8 +335,8 @@ QToolTip { color: @TOOLTIP_TEXT@; background: @TOOLTIP_BG@; border: 1px solid @T
 MainWindow::MainWindow() {
     setWindowTitle("BAM Seek — variant allele frequency");
     setAcceptDrops(true);
-    resize(1320, 900);
-    setMinimumSize(1040, 720);
+    resize(1440, 980);
+    setMinimumSize(1080, 760);
     setFont(QFontDatabase::systemFont(QFontDatabase::GeneralFont));
     dark_mode_ = QSettings().value("appearance/dark_mode", true).toBool();
     setStyleSheet(premium_style(dark_mode_));
@@ -344,7 +363,7 @@ MainWindow::MainWindow() {
     analysis_page->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     auto* analysis_content = new QWidget(analysis_page);
     analysis_content->setObjectName("AppRoot");
-    analysis_content->setMinimumSize(980, 650);
+    analysis_content->setMinimumSize(1020, 680);
     analysis_page->setWidget(analysis_content);
     auto* analysis_layout = new QVBoxLayout(analysis_content);
     analysis_layout->setContentsMargins(4, 14, 8, 8);
@@ -352,7 +371,7 @@ MainWindow::MainWindow() {
 
     auto* input_splitter = new QSplitter(Qt::Horizontal, analysis_content);
     input_splitter->setChildrenCollapsible(false);
-    input_splitter->setFixedHeight(300);
+    input_splitter->setFixedHeight(340);
 
     auto* bam_card = new QFrame(input_splitter);
     bam_card->setObjectName("Card");
@@ -393,7 +412,7 @@ MainWindow::MainWindow() {
     loaded_bams_->setAlternatingRowColors(false);
     loaded_bams_->setSelectionMode(QAbstractItemView::ExtendedSelection);
     loaded_bams_->setMinimumHeight(70);
-    loaded_bams_->setToolTip("Prepared BAMs are reused when VAF calculation is requested.");
+    loaded_bams_->setToolTip("Check one BAM to designate the current sample. Unchecked BAMs are historical.");
     bam_layout->addWidget(loaded_bams_, 1);
 
     auto* variant_card = new QFrame(input_splitter);
@@ -402,12 +421,22 @@ MainWindow::MainWindow() {
     variant_layout->setContentsMargins(14, 12, 14, 14);
     variant_layout->setSpacing(8);
     variant_layout->addWidget(section_title("Variants", variant_card));
-    query_text_ = new QPlainTextEdit(variant_card);
-    query_text_->setPlaceholderText(
-        "chr7:140453136 A>T\n"
-        "chr7:g.140453136A>T\n"
-        "BRAF c.1799T>A p.V600E chr7:140453136 A>T");
-    variant_layout->addWidget(query_text_, 1);
+    auto* current_header = new QHBoxLayout();
+    current_header->addWidget(role_label("Current variants", "CurrentRole", variant_card));
+    current_header->addStretch(1);
+    variant_layout->addLayout(current_header);
+    current_query_text_ = new QPlainTextEdit(variant_card);
+    current_query_text_->setPlaceholderText(
+        "IGV 9 139390861 NOTCH1 stop_gained c.7330C>T p.Q2444* G A 3.1");
+    variant_layout->addWidget(current_query_text_, 1);
+    auto* historical_header = new QHBoxLayout();
+    historical_header->addWidget(role_label("Historical variants", "HistoricalRole", variant_card));
+    historical_header->addStretch(1);
+    variant_layout->addLayout(historical_header);
+    historical_query_text_ = new QPlainTextEdit(variant_card);
+    historical_query_text_->setPlaceholderText(
+        "5 176943930 DDX41 ENST00000507955.1 MISSENSE c.17C>T p.P6L G A");
+    variant_layout->addWidget(historical_query_text_, 1);
     auto* filter_row = new QHBoxLayout();
     filter_row->addWidget(muted_label("mapQ ≥", variant_card));
     minimum_mapq_ = new QLineEdit("20", variant_card);
@@ -447,12 +476,13 @@ MainWindow::MainWindow() {
     results_layout->setSpacing(8);
     results_layout->addWidget(section_title("VAF results", results_card));
     results_ = new QTableWidget(results_card);
-    results_->setColumnCount(11);
-    results_->setHorizontalHeaderLabels({"BAM", "Variant", "ALT reads", "Depth", "VAF",
-        "ALT mol.", "Mol. depth", "Mol. VAF", "Other/N", "Ambig.", "F / R"});
-    const QStringList result_header_tips{"BAM source", "Variant", "Alternate-supporting reads", "Informative read depth",
-        "Read variant allele frequency", "Alternate-supporting molecules", "Informative molecule depth",
-        "Molecule variant allele frequency", "OTHER/N reads", "Ambiguous molecules", "ALT forward / reverse reads"};
+    results_->setColumnCount(13);
+    results_->setHorizontalHeaderLabels({"Sample", "BAM", "Variant set", "Variant", "ALT reads", "REF reads", "VAF",
+        "ALT mol.", "REF mol.", "Mol. VAF", "Other/N", "Ambig.", "F / R"});
+    const QStringList result_header_tips{"Current or historical sample", "BAM source", "Variant input set", "Variant",
+        "Alternate-supporting reads", "Reference-supporting reads", "Read variant allele frequency",
+        "Alternate-supporting molecules", "Reference-supporting molecules", "Molecule variant allele frequency",
+        "OTHER/N reads", "Ambiguous molecules", "ALT forward / reverse reads"};
     for (int column = 0; column < result_header_tips.size(); ++column) {
         results_->horizontalHeaderItem(column)->setToolTip(result_header_tips[column]);
     }
@@ -463,7 +493,9 @@ MainWindow::MainWindow() {
     results_->setShowGrid(false);
     results_->verticalHeader()->setVisible(false);
     results_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-    results_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    results_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Fixed);
+    results_->horizontalHeader()->resizeSection(1, 190);
+    results_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
     results_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     results_->setMinimumHeight(100);
     results_layout->addWidget(results_, 1);
@@ -473,7 +505,7 @@ MainWindow::MainWindow() {
     summary_layout->setContentsMargins(10, 6, 10, 8);
     summary_layout->setSpacing(5);
     auto* summary_header = new QHBoxLayout();
-    summary_header->addWidget(muted_label("Summary", summary_panel));
+    summary_header->addWidget(muted_label("Comparison narrative", summary_panel));
     summary_header->addStretch(1);
     copy_summary_button_ = new QPushButton("Copy summary", summary_panel);
     copy_summary_button_->setEnabled(false);
@@ -482,8 +514,9 @@ MainWindow::MainWindow() {
     summary_text_ = new QPlainTextEdit(summary_panel);
     summary_text_->setObjectName("SummaryBox");
     summary_text_->setReadOnly(true);
-    summary_text_->setFixedHeight(48);
-    summary_text_->setPlaceholderText("Select a result to generate a copy-ready paragraph.");
+    summary_text_->setMinimumHeight(120);
+    summary_text_->setMaximumHeight(190);
+    summary_text_->setPlaceholderText("Run the analysis to generate copy-ready comparison paragraphs.");
     summary_layout->addWidget(summary_text_);
     results_layout->addWidget(summary_panel);
     analysis_layout->addWidget(results_card, 1);
@@ -528,10 +561,10 @@ MainWindow::MainWindow() {
     connect(loaded_bams_, &QListWidget::itemSelectionChanged, this, [this] {
         remove_bams_button_->setEnabled(!busy() && !loaded_bams_->selectedItems().isEmpty());
     });
+    connect(loaded_bams_, &QListWidget::itemChanged, this, [this](QListWidgetItem* item) { set_current_bam(item); });
     connect(run_button_, &QPushButton::clicked, this, [this] { run_queries(); });
     connect(copy_summary_button_, &QPushButton::clicked, this, [this] { copy_summary(); });
     connect(theme_button_, &QPushButton::clicked, this, [this] { toggle_theme(); });
-    connect(results_, &QTableWidget::cellClicked, this, [this](const int row, const int column) { show_result_summary(row, column); });
     connect(&bam_load_watcher_, &QFutureWatcher<BamLoadBatch>::finished, this, [this] { bams_loaded(); });
     connect(&watcher_, &QFutureWatcher<MultiBamBatch>::finished, this, [this] { show_results(); });
 
@@ -570,14 +603,29 @@ void MainWindow::apply_theme() {
         theme_button_->setToolTip(dark_mode_ ? "Switch to light mode" : "Switch to dark mode");
     }
     if (loaded_bams_ != nullptr) {
-        const QColor ready_color(dark_mode_ ? "#b7efcf" : "#157347");
-        for (int row = 0; row < loaded_bams_->count(); ++row) loaded_bams_->item(row)->setForeground(ready_color);
+        const QColor current_color(dark_mode_ ? "#c8c1ff" : "#5541c8");
+        const QColor historical_color(dark_mode_ ? "#8fddd2" : "#087568");
+        for (int row = 0; row < loaded_bams_->count(); ++row) {
+            auto* item = loaded_bams_->item(row);
+            item->setForeground(item->checkState() == Qt::Checked ? current_color : historical_color);
+        }
     }
     if (results_ != nullptr) {
         const QColor accent(dark_mode_ ? "#b8adff" : "#5b48d6");
+        const QColor current_color(dark_mode_ ? "#c8c1ff" : "#5541c8");
+        const QColor historical_color(dark_mode_ ? "#8fddd2" : "#087568");
         for (int row = 0; row < results_->rowCount(); ++row) {
-            if (results_->item(row, 4) != nullptr) results_->item(row, 4)->setForeground(accent);
-            if (results_->item(row, 7) != nullptr) results_->item(row, 7)->setForeground(accent);
+            if (results_->item(row, 0) != nullptr) {
+                results_->item(row, 0)->setForeground(results_->item(row, 0)->data(Qt::UserRole).toBool()
+                    ? current_color : historical_color);
+            }
+            if (results_->item(row, 2) != nullptr) {
+                const auto origin = static_cast<VariantOrigin>(results_->item(row, 2)->data(Qt::UserRole).toInt());
+                results_->item(row, 2)->setForeground(origin == VariantOrigin::current ? current_color
+                    : origin == VariantOrigin::historical ? historical_color : accent);
+            }
+            if (results_->item(row, 6) != nullptr) results_->item(row, 6)->setForeground(accent);
+            if (results_->item(row, 9) != nullptr) results_->item(row, 9)->setForeground(accent);
         }
     }
 }
@@ -677,6 +725,7 @@ void MainWindow::start_bam_preparation(const QStringList& pending, const bool cl
     run_button_->setEnabled(false);
     remove_bams_button_->setEnabled(false);
     clear_bams_button_->setEnabled(false);
+    loaded_bams_->setEnabled(false);
     clear_bam_input_after_load_ = clear_manual_input;
     preparing_bam_paths_ = candidates;
     status_->setText(QString("Preparing %1 BAM source(s) in the background…").arg(candidates.size()));
@@ -711,15 +760,12 @@ void MainWindow::bams_loaded() {
     }
     if (!loaded.bams.isEmpty()) {
         if (clear_bam_input_after_load_) bam_path_->clear();
-        last_batch_ = {};
-        result_bam_paths_.clear();
-        results_->setRowCount(0);
-        summary_text_->clear();
-        copy_summary_button_->setEnabled(false);
+        clear_results();
     }
     bam_path_->setEnabled(true);
     load_bams_button_->setEnabled(true);
     run_button_->setEnabled(true);
+    loaded_bams_->setEnabled(true);
     refresh_loaded_bams();
     status_->setText(QString("%1 BAM(s) ready. No VAF calculation has run yet.").arg(loaded_bam_paths_.size()));
     if (!loaded.issues.isEmpty()) QMessageBox::warning(this, "BAM preparation notes", loaded.issues.join('\n'));
@@ -758,15 +804,12 @@ void MainWindow::remove_selected_bams() {
     std::sort(rows.begin(), rows.end(), std::greater<>());
     rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
     for (const int row : rows) {
+        if (loaded_bam_paths_[row] == current_bam_path_) current_bam_path_.clear();
         loaded_bam_paths_.removeAt(row);
         loaded_index_paths_.removeAt(row);
         loaded_engines_.erase(loaded_engines_.begin() + row);
     }
-    last_batch_ = {};
-    result_bam_paths_.clear();
-    results_->setRowCount(0);
-    summary_text_->clear();
-    copy_summary_button_->setEnabled(false);
+    clear_results();
     refresh_loaded_bams();
     status_->setText(QString("%1 BAM(s) ready. Results cleared after source changes.").arg(loaded_bam_paths_.size()));
 }
@@ -776,32 +819,72 @@ void MainWindow::clear_loaded_bams() {
     loaded_bam_paths_.clear();
     loaded_index_paths_.clear();
     loaded_engines_.clear();
-    result_bam_paths_.clear();
-    last_batch_ = {};
-    results_->setRowCount(0);
-    summary_text_->clear();
-    copy_summary_button_->setEnabled(false);
+    current_bam_path_.clear();
+    clear_results();
     refresh_loaded_bams();
     status_->setText("BAM panel cleared.");
 }
 
 void MainWindow::refresh_loaded_bams() {
+    if (!current_bam_path_.isEmpty() && !loaded_bam_paths_.contains(current_bam_path_)) current_bam_path_.clear();
+    refreshing_bam_list_ = true;
     loaded_bams_->clear();
     for (qsizetype i = 0; i < loaded_bam_paths_.size(); ++i) {
         const auto& bam = loaded_bam_paths_[i];
         const bool remote = bam.startsWith("https://");
-        auto* item = new QListWidgetItem(QString("●  %1\n    %2 · Ready")
-            .arg(resource_label(bam), remote ? "HTTPS" : "Local"), loaded_bams_);
-        item->setForeground(QColor(dark_mode_ ? "#b7efcf" : "#157347"));
+        const bool current = bam == current_bam_path_;
+        auto* item = new QListWidgetItem(QString("%1\n%2 · %3 · Ready")
+            .arg(resource_label(bam), current ? "Current" : "Historical", remote ? "HTTPS" : "Local"), loaded_bams_);
+        item->setData(Qt::UserRole, bam);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState(current ? Qt::Checked : Qt::Unchecked);
+        item->setForeground(QColor(current ? (dark_mode_ ? "#c8c1ff" : "#5541c8")
+                                           : (dark_mode_ ? "#8fddd2" : "#087568")));
         item->setSizeHint(QSize(0, 48));
-        item->setToolTip("BAM: " + sanitized_resource_uri(bam) + "\nIndex: "
+        item->setToolTip(QString("%1 sample · check to make this the only current BAM\nBAM: ")
+            .arg(current ? "Current" : "Historical") + sanitized_resource_uri(bam) + "\nIndex: "
             + (loaded_index_paths_[i].isEmpty() ? "automatic remote discovery" : loaded_index_paths_[i]));
     }
+    refreshing_bam_list_ = false;
     bam_count_->setText(QString("%1 ready").arg(loaded_bam_paths_.size()));
     const bool has_bams = !loaded_bam_paths_.isEmpty();
     run_button_->setEnabled(has_bams && !busy());
     remove_bams_button_->setEnabled(has_bams && !loaded_bams_->selectedItems().isEmpty() && !busy());
     clear_bams_button_->setEnabled(has_bams && !busy());
+}
+
+void MainWindow::set_current_bam(QListWidgetItem* changed_item) {
+    if (refreshing_bam_list_ || changed_item == nullptr || busy()) return;
+    const auto path = changed_item->data(Qt::UserRole).toString();
+    const auto previous = current_bam_path_;
+    if (changed_item->checkState() == Qt::Checked) current_bam_path_ = path;
+    else if (current_bam_path_ == path) current_bam_path_.clear();
+    if (current_bam_path_ == previous) return;
+    clear_results();
+    refreshing_bam_list_ = true;
+    for (int row = 0; row < loaded_bams_->count(); ++row) {
+        auto* item = loaded_bams_->item(row);
+        const auto item_path = item->data(Qt::UserRole).toString();
+        const bool current = item_path == current_bam_path_;
+        const bool remote = item_path.startsWith("https://");
+        item->setCheckState(current ? Qt::Checked : Qt::Unchecked);
+        item->setText(QString("%1\n%2 · %3 · Ready")
+            .arg(resource_label(item_path), current ? "Current" : "Historical", remote ? "HTTPS" : "Local"));
+    }
+    refreshing_bam_list_ = false;
+    apply_theme();
+    status_->setText(current_bam_path_.isEmpty()
+        ? "No current BAM selected; all BAMs are historical. Results cleared."
+        : resource_label(current_bam_path_) + " designated as the current sample. Results cleared.");
+}
+
+void MainWindow::clear_results() {
+    last_batch_ = {};
+    result_bam_paths_.clear();
+    result_variant_origins_.clear();
+    results_->setRowCount(0);
+    summary_text_->clear();
+    copy_summary_button_->setEnabled(false);
 }
 
 FilterSettings MainWindow::filters() const {
@@ -825,19 +908,30 @@ void MainWindow::run_queries() {
         QMessageBox::warning(this, "Invalid quality filters", "MapQ and baseQ must be integers from 0 to 255.");
         return;
     }
-    auto parsed = parse_queries(query_text_->toPlainText().toStdString());
-    std::vector<Query> variants;
-    variants.reserve(parsed.queries.size());
-    for (auto& query : parsed.queries) {
-        if (std::holds_alternative<VariantQuery>(query)) variants.push_back(std::move(query));
-        else parsed.errors.push_back(std::get<RegionQuery>(query).source_text
-            + ": enter a specific REF>ALT variant rather than a region");
-    }
-    if (variants.empty()) {
-        QMessageBox::warning(this, "No valid variants", QString::fromStdString(parsed.errors.empty()
-            ? "Enter at least one variant." : parsed.errors.front()));
+    auto current_parsed = parse_queries(current_query_text_->toPlainText().toStdString());
+    auto historical_parsed = parse_queries(historical_query_text_->toPlainText().toStdString());
+    std::vector<VariantQuery> current_variants;
+    std::vector<VariantQuery> historical_variants;
+    std::vector<std::string> errors;
+    const auto collect = [&errors](ParsedQueries& parsed, std::vector<VariantQuery>& destination, const std::string& label) {
+        for (auto& error : parsed.errors) errors.push_back('[' + label + "] " + std::move(error));
+        for (auto& query : parsed.queries) {
+            if (auto* variant = std::get_if<VariantQuery>(&query)) destination.push_back(std::move(*variant));
+            else errors.push_back('[' + label + "] " + std::get<RegionQuery>(query).source_text
+                + ": enter a specific REF>ALT variant rather than a region");
+        }
+    };
+    collect(current_parsed, current_variants, "Current variants");
+    collect(historical_parsed, historical_variants, "Historical variants");
+    auto classified = classify_variants(current_variants, historical_variants);
+    if (classified.empty()) {
+        QMessageBox::warning(this, "No valid variants", QString::fromStdString(errors.empty()
+            ? "Enter at least one current or historical variant." : errors.front()));
         return;
     }
+    std::vector<Query> variants;
+    variants.reserve(classified.size());
+    for (const auto& item : classified) variants.emplace_back(item.query);
 
     last_filters_ = filters();
     const auto bams = loaded_bam_paths_;
@@ -846,10 +940,13 @@ void MainWindow::run_queries() {
     load_bams_button_->setEnabled(false);
     remove_bams_button_->setEnabled(false);
     clear_bams_button_->setEnabled(false);
-    status_->setText(QString("Calculating %1 variant(s) across %2 prepared BAM(s)…")
+    loaded_bams_->setEnabled(false);
+    current_query_text_->setEnabled(false);
+    historical_query_text_->setEnabled(false);
+    status_->setText(QString("Calculating %1 distinct variant(s) across %2 prepared BAM(s)…")
         .arg(variants.size()).arg(bams.size()));
-    watcher_.setFuture(QtConcurrent::run([queries = std::move(variants), errors = std::move(parsed.errors),
-                                          filter_values = last_filters_, bams, engines] {
+    watcher_.setFuture(QtConcurrent::run([queries = std::move(variants), classified = std::move(classified),
+                                          errors = std::move(errors), filter_values = last_filters_, bams, engines] {
         MultiBamBatch combined;
         combined.batch.errors = errors;
         for (std::size_t source_index = 0; source_index < engines.size(); ++source_index) {
@@ -857,6 +954,11 @@ void MainWindow::run_queries() {
             try {
                 auto evaluated = engines[source_index]->evaluate(queries, filter_values);
                 for (auto& result : evaluated.results) {
+                    if (const auto* evidence = std::get_if<VariantEvidence>(&result)) {
+                        combined.result_variant_origins.push_back(origin_for(evidence->query, classified));
+                    } else {
+                        combined.result_variant_origins.push_back(VariantOrigin::current);
+                    }
                     combined.batch.results.push_back(std::move(result));
                     combined.result_bams.append(bam);
                 }
@@ -876,56 +978,74 @@ void MainWindow::show_results() {
     const auto combined = watcher_.result();
     last_batch_ = combined.batch;
     result_bam_paths_ = combined.result_bams;
+    result_variant_origins_ = combined.result_variant_origins;
     results_->setRowCount(0);
-    for (int row = 0; row < static_cast<int>(last_batch_.results.size()); ++row) {
-        const auto* evidence = std::get_if<VariantEvidence>(&last_batch_.results[static_cast<std::size_t>(row)]);
+    std::vector<std::size_t> order(last_batch_.results.size());
+    for (std::size_t index = 0; index < order.size(); ++index) order[index] = index;
+    std::sort(order.begin(), order.end(), [this](const std::size_t left, const std::size_t right) {
+        const bool left_current = !current_bam_path_.isEmpty() && result_bam_paths_[static_cast<qsizetype>(left)] == current_bam_path_;
+        const bool right_current = !current_bam_path_.isEmpty() && result_bam_paths_[static_cast<qsizetype>(right)] == current_bam_path_;
+        if (left_current != right_current) return left_current;
+        const auto left_bam = resource_label(result_bam_paths_[static_cast<qsizetype>(left)]).toCaseFolded();
+        const auto right_bam = resource_label(result_bam_paths_[static_cast<qsizetype>(right)]).toCaseFolded();
+        if (left_bam != right_bam) return left_bam < right_bam;
+        const auto* left_evidence = std::get_if<VariantEvidence>(&last_batch_.results[left]);
+        const auto* right_evidence = std::get_if<VariantEvidence>(&last_batch_.results[right]);
+        if (left_evidence == nullptr || right_evidence == nullptr) return left < right;
+        return display_query(left_evidence->query).toCaseFolded() < display_query(right_evidence->query).toCaseFolded();
+    });
+
+    std::vector<ComparativeEvidence> narrative_evidence;
+    narrative_evidence.reserve(last_batch_.results.size());
+    for (const auto source_row : order) {
+        const auto* evidence = std::get_if<VariantEvidence>(&last_batch_.results[source_row]);
         if (evidence == nullptr) continue;
+        const auto bam_index = static_cast<qsizetype>(source_row);
+        const auto& bam_path = result_bam_paths_[bam_index];
+        const bool current_bam = !current_bam_path_.isEmpty() && bam_path == current_bam_path_;
+        const auto origin = result_variant_origins_[source_row];
+        const int row = results_->rowCount();
         results_->insertRow(row);
         const auto& count = evidence->counts;
-        const QList<QString> values{resource_label(result_bam_paths_[row]), display_query(evidence->query),
-            QString::number(count.alternate_reads), QString::number(count.informative_read_depth()), percent(count.allele_fraction()),
+        const QList<QString> values{current_bam ? "Current" : "Historical", compact_resource_label(bam_path, results_->font()),
+            variant_origin_label(origin), display_query(evidence->query),
+            QString::number(count.alternate_reads), QString::number(count.reference_reads), percent(count.allele_fraction()),
             evidence->molecule_counts_available ? QString::number(count.alternate_molecules) : "N/A",
-            evidence->molecule_counts_available ? QString::number(count.molecule_depth()) : "N/A",
+            evidence->molecule_counts_available ? QString::number(count.reference_molecules) : "N/A",
             evidence->molecule_counts_available ? percent(count.molecule_allele_fraction()) : "N/A",
             QString::number(count.other_reads),
             evidence->molecule_counts_available ? QString::number(count.other_molecules) : "N/A",
             QString("%1 / %2").arg(count.alternate_forward_reads).arg(count.alternate_reverse_reads)};
         for (int column = 0; column < values.size(); ++column) {
             auto* item = new QTableWidgetItem(values[column]);
-            item->setTextAlignment(column >= 2 ? Qt::AlignCenter : Qt::AlignVCenter | Qt::AlignLeft);
-            if (column == 0) item->setToolTip(sanitized_resource_uri(result_bam_paths_[row]));
-            if ((column == 4 || column == 7) && count.alternate_reads > 0) {
-                item->setForeground(QColor(dark_mode_ ? "#b8adff" : "#5b48d6"));
-            }
+            item->setTextAlignment(column >= 4 ? Qt::AlignCenter : Qt::AlignVCenter | Qt::AlignLeft);
+            if (column == 0) item->setData(Qt::UserRole, current_bam);
+            if (column == 1) item->setToolTip(sanitized_resource_uri(bam_path));
+            if (column == 2) item->setData(Qt::UserRole, static_cast<int>(origin));
             results_->setItem(row, column, item);
         }
+        narrative_evidence.push_back({resource_label(bam_path).toStdString(), current_bam, origin, *evidence});
     }
+    apply_theme();
     run_button_->setEnabled(true);
     load_bams_button_->setEnabled(true);
+    loaded_bams_->setEnabled(true);
+    current_query_text_->setEnabled(true);
+    historical_query_text_->setEnabled(true);
     refresh_loaded_bams();
     status_->setText(QString("%1 result(s) ready · %2 issue(s)")
         .arg(last_batch_.results.size()).arg(last_batch_.errors.size()));
     QString issue_text;
     for (const auto& error : last_batch_.errors) issue_text += QString::fromStdString(error) + '\n';
     status_->setToolTip(issue_text.trimmed());
-    if (results_->rowCount() > 0) {
-        results_->selectRow(0);
-        show_result_summary(0);
-    } else {
-        summary_text_->setPlainText(issue_text.trimmed());
-        copy_summary_button_->setEnabled(!issue_text.trimmed().isEmpty());
-    }
+    const auto narrative = QString::fromStdString(comparison_narrative(narrative_evidence)).trimmed();
+    summary_text_->setPlainText(narrative.isEmpty()
+        ? "No comparison-specific narrative was generated. Variants listed in both sets are excluded, and historical-only variants require a current BAM."
+        : narrative);
+    copy_summary_button_->setEnabled(!narrative.isEmpty());
     if (!queued_receiver_bams_.isEmpty()) {
         QTimer::singleShot(0, this, [this] { load_queued_receiver_bams(); });
     }
-}
-
-void MainWindow::show_result_summary(const int row, const int) {
-    if (row < 0 || static_cast<std::size_t>(row) >= last_batch_.results.size()) return;
-    const auto* evidence = std::get_if<VariantEvidence>(&last_batch_.results[static_cast<std::size_t>(row)]);
-    if (evidence == nullptr) return;
-    summary_text_->setPlainText(evidence_summary(*evidence, resource_label(result_bam_paths_[row])));
-    copy_summary_button_->setEnabled(true);
 }
 
 void MainWindow::copy_summary() {
