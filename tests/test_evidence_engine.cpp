@@ -120,7 +120,8 @@ int main() {
         {bamseek::VariantQuery{"chr1:35 A>AT", "chr1", 34, "A", "AT"}}, raw_filters);
     const auto& insertion = std::get<bamseek::VariantEvidence>(insertion_batch.results.front());
     if (!insertion_batch.errors.empty() || insertion.counts.alternate_reads != 1 || insertion.counts.reference_reads != 1
-        || insertion.counts.other_reads != 1 || insertion.counts.depth() != 3) {
+        || insertion.counts.other_reads != 1 || insertion.counts.depth() != 3
+        || insertion.overlapping_alignments != 4 || insertion.low_base_quality_alignments != 1) {
         std::cerr << "Insertion quality or adjacent deletion classification regression\n";
         return EXIT_FAILURE;
     }
@@ -131,6 +132,31 @@ int main() {
     if (!deletion_batch.errors.empty() || deletion.counts.alternate_reads != 1 || deletion.counts.reference_reads != 1
         || deletion.counts.other_reads != 1) {
         std::cerr << "Exact deletion classification regression\n";
+        return EXIT_FAILURE;
+    }
+
+    const auto paired_insertion_batch = evidence_engine.evaluate(
+        {bamseek::VariantQuery{"chr1:85 A>AT", "chr1", 84, "A", "AT"}}, raw_filters);
+    const auto& paired_insertion = std::get<bamseek::VariantEvidence>(paired_insertion_batch.results.front());
+    if (!paired_insertion_batch.errors.empty() || paired_insertion.counts.alternate_reads != 2
+        || paired_insertion.counts.reference_reads != 0 || paired_insertion.counts.alternate_molecules != 1
+        || paired_insertion.counts.molecule_depth() != 1
+        || std::abs(paired_insertion.counts.allele_fraction() - 1.0) > 1e-12
+        || std::abs(paired_insertion.counts.molecule_allele_fraction() - 1.0) > 1e-12) {
+        std::cerr << "Insertion read pairs must remain two reads but collapse to one molecule\n";
+        return EXIT_FAILURE;
+    }
+
+    const auto alias_cache_key = bamseek::evidence_cache_key(
+        bamseek::VariantQuery{"1:85 A>AT", "1", 84, "A", "AT"}, raw_filters);
+    const auto canonical_cache_key = bamseek::evidence_cache_key(
+        bamseek::VariantQuery{"chr1:85 A>AT", "chr1", 84, "A", "AT"}, raw_filters);
+    auto changed_filter = raw_filters;
+    ++changed_filter.minimum_base_quality;
+    if (alias_cache_key != canonical_cache_key
+        || canonical_cache_key == bamseek::evidence_cache_key(
+            bamseek::VariantQuery{"chr1:85 A>AT", "chr1", 84, "A", "AT"}, changed_filter)) {
+        std::cerr << "Evidence cache keys must normalize contig aliases and include filters\n";
         return EXIT_FAILURE;
     }
 

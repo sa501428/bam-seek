@@ -8,6 +8,8 @@
 #include <QStringList>
 
 #include <memory>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 class QCheckBox;
@@ -46,6 +48,7 @@ private:
     void clear_results();
     void run_queries();
     void show_results();
+    void render_results();
     void copy_summary();
     void toggle_theme();
     void apply_theme();
@@ -88,6 +91,7 @@ private:
     std::vector<std::shared_ptr<EvidenceEngine>> loaded_engines_;
     QStringList result_bam_paths_;
     std::vector<VariantOrigin> result_variant_origins_;
+    std::unordered_map<std::string, std::unordered_map<std::string, VariantEvidence>> evidence_cache_;
     bool clear_bam_input_after_load_ = false;
     bool refreshing_bam_list_ = false;
 
@@ -103,6 +107,9 @@ private:
         BatchEvidence batch;
         QStringList result_bams;
         std::vector<VariantOrigin> result_variant_origins;
+        std::unordered_map<std::string, std::unordered_map<std::string, VariantEvidence>> cache_updates;
+        std::size_t cache_hits{};
+        std::size_t calculations{};
     };
     QFutureWatcher<MultiBamBatch> watcher_;
 };

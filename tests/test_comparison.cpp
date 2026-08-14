@@ -19,7 +19,11 @@ bamseek::ComparativeEvidence evidence(const bamseek::VariantQuery& query, const 
     counts.reference_reads = ref_reads;
     counts.alternate_molecules = alt_molecules;
     counts.reference_molecules = ref_reads;
-    return {bam, current_bam, origin, {query, counts, {}, true}};
+    bamseek::VariantEvidence observed;
+    observed.query = query;
+    observed.counts = counts;
+    observed.molecule_counts_available = true;
+    return {bam, current_bam, origin, std::move(observed)};
 }
 
 }  // namespace

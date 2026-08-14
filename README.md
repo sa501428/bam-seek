@@ -38,9 +38,11 @@ Each BAM and variant receives a separate result row containing:
 
 The evidence table labels BAM and variant roles with separate colors, displays compact BAM filenames with the complete source in a tooltip, places a selected current BAM first, and otherwise sorts BAMs and variants alphabetically. The copy-ready comparison narrative evaluates current-only variants against every historical BAM, separates molecularly detected and absent variants, and evaluates historical-only variants against the current BAM when one is selected.
 
+Successful evidence calculations are cached in memory by BAM, normalized genomic allele, and all calculation filters. Changing which BAM is current immediately reuses and re-labels the displayed evidence without querying any BAM again. Re-running after adding a BAM calculates only uncached BAM–variant pairs. Removing a BAM erases its cache entries, clearing the BAM panel erases the whole cache, and exiting BAM Seek destroys the cache; it is never written to disk.
+
 Molecules are paired fragments, not UMI families. Alignments with the same read name are grouped together, and a REF or ALT molecule call requires an unambiguous majority among that fragment's callable alignments. Ties and conflicting calls are counted as ambiguous molecules.
 
-The optional mapQ and baseQ controls filter low-quality alignments and allele observations. Duplicates, secondary alignments, and supplementary alignments are excluded by default.
+The optional mapQ and baseQ controls filter low-quality alignments and allele observations. Duplicates, secondary alignments, and supplementary alignments are excluded by default. Hovering over a variant or evidence count shows how many overlapping alignments were excluded by alignment/mapQ filters, lacked a callable allele, or fell below the baseQ threshold. For an insertion, baseQ is evaluated across the left anchor and every inserted base; consequently, IGV may display an insertion alignment that is intentionally excluded from the numeric VAF at the selected baseQ threshold.
 
 ## Broadcast receiver
 

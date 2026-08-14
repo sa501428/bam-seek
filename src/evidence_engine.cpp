@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <iomanip>
 #include <limits>
 #include <map>
 #include <sstream>
@@ -330,9 +331,20 @@ VariantEvidence evaluate_variant(const igv::AlignmentReader& reader, const Varia
     std::vector<CalledRead> called_reads;
     std::vector<const igv::Alignment*> callable_alignments;
     for (const auto& alignment : alignments) {
-        if (!include_alignment(alignment, filters)) continue;
+        ++evidence.overlapping_alignments;
+        if (!include_alignment(alignment, filters)) {
+            ++evidence.filtered_alignments;
+            continue;
+        }
         const auto called = call_allele(alignment, variant);
-        if (called.allele == Allele::no_call || called.minimum_base_quality < filters.minimum_base_quality) continue;
+        if (called.allele == Allele::no_call) {
+            ++evidence.uncallable_alignments;
+            continue;
+        }
+        if (called.minimum_base_quality < filters.minimum_base_quality) {
+            ++evidence.low_base_quality_alignments;
+            continue;
+        }
         called_reads.push_back({&alignment, called});
         callable_alignments.push_back(&alignment);
     }
@@ -390,6 +402,19 @@ double hypergeometric_probability(const int x, const int row_one, const int colu
 }
 
 }  // namespace
+
+std::string evidence_cache_key(const VariantQuery& query, const FilterSettings& filters) {
+    std::ostringstream key;
+    key << contig_key(query.contig) << ':' << query.position << ':'
+        << query.reference.size() << ':' << query.reference << ':'
+        << query.alternate.size() << ':' << query.alternate << '|'
+        << filters.minimum_mapping_quality << ':' << filters.minimum_base_quality << ':'
+        << filters.include_duplicates << ':' << filters.include_secondary << ':' << filters.include_supplementary << ':'
+        << std::setprecision(std::numeric_limits<double>::max_digits10) << filters.minimum_variant_allele_fraction << ':'
+        << filters.minimum_alternate_reads << ':' << filters.minimum_alternate_molecules << ':'
+        << static_cast<int>(filters.molecule_mode) << ':' << filters.molecule_tag;
+    return key.str();
+}
 
 double EvidenceCounts::allele_fraction() const noexcept {
     const auto denominator = informative_read_depth();

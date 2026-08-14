@@ -29,6 +29,8 @@ struct FilterSettings {
     std::string molecule_tag;
 };
 
+[[nodiscard]] std::string evidence_cache_key(const VariantQuery& query, const FilterSettings& filters);
+
 struct ReadEvidence {
     std::string read_name;
     Allele allele = Allele::no_call;
@@ -65,6 +67,10 @@ struct EvidenceCounts {
 struct VariantEvidence {
     VariantQuery query;
     EvidenceCounts counts;
+    int overlapping_alignments{};
+    int filtered_alignments{};
+    int uncallable_alignments{};
+    int low_base_quality_alignments{};
     std::string molecule_tag_used;
     bool molecule_counts_available = false;
     int reads_missing_molecule_tag{};

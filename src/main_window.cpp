@@ -127,13 +127,6 @@ QString compact_resource_label(const QString& path, const QFont& font) {
     return QFontMetrics(font).elidedText(resource_label(path), Qt::ElideMiddle, 176);
 }
 
-VariantOrigin origin_for(const VariantQuery& query, const std::vector<ClassifiedVariant>& variants) {
-    const auto found = std::find_if(variants.begin(), variants.end(), [&](const auto& candidate) {
-        return candidate.query.source_text == query.source_text;
-    });
-    return found == variants.end() ? VariantOrigin::current : found->origin;
-}
-
 QLabel* section_title(const QString& text, QWidget* parent) {
     auto* label = new QLabel(text, parent);
     label->setObjectName("SectionTitle");
@@ -807,6 +800,7 @@ void MainWindow::remove_selected_bams() {
     std::sort(rows.begin(), rows.end(), std::greater<>());
     rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
     for (const int row : rows) {
+        evidence_cache_.erase(loaded_bam_paths_[row].toStdString());
         if (loaded_bam_paths_[row] == current_bam_path_) current_bam_path_.clear();
         loaded_bam_paths_.removeAt(row);
         loaded_index_paths_.removeAt(row);
@@ -822,6 +816,7 @@ void MainWindow::clear_loaded_bams() {
     loaded_bam_paths_.clear();
     loaded_index_paths_.clear();
     loaded_engines_.clear();
+    evidence_cache_.clear();
     current_bam_path_.clear();
     clear_results();
     refresh_loaded_bams();
@@ -863,7 +858,6 @@ void MainWindow::set_current_bam(QListWidgetItem* changed_item) {
     if (changed_item->checkState() == Qt::Checked) current_bam_path_ = path;
     else if (current_bam_path_ == path) current_bam_path_.clear();
     if (current_bam_path_ == previous) return;
-    clear_results();
     refreshing_bam_list_ = true;
     for (int row = 0; row < loaded_bams_->count(); ++row) {
         auto* item = loaded_bams_->item(row);
@@ -876,9 +870,12 @@ void MainWindow::set_current_bam(QListWidgetItem* changed_item) {
     }
     refreshing_bam_list_ = false;
     apply_theme();
+    const bool has_results = !last_batch_.results.empty();
+    if (has_results) render_results();
     status_->setText(current_bam_path_.isEmpty()
-        ? "No current BAM selected; all BAMs are historical. Results cleared."
-        : resource_label(current_bam_path_) + " designated as the current sample. Results cleared.");
+        ? QString("No current BAM selected; all BAMs are historical.%1").arg(has_results ? " Existing VAF evidence reused." : "")
+        : resource_label(current_bam_path_) + " designated as current."
+            + (has_results ? " Existing VAF evidence reused." : ""));
 }
 
 void MainWindow::clear_results() {
@@ -932,13 +929,10 @@ void MainWindow::run_queries() {
             ? "Enter at least one current or historical variant." : errors.front()));
         return;
     }
-    std::vector<Query> variants;
-    variants.reserve(classified.size());
-    for (const auto& item : classified) variants.emplace_back(item.query);
-
     last_filters_ = filters();
     const auto bams = loaded_bam_paths_;
     const auto engines = loaded_engines_;
+    auto cache_snapshot = evidence_cache_;
     run_button_->setEnabled(false);
     load_bams_button_->setEnabled(false);
     remove_bams_button_->setEnabled(false);
@@ -947,30 +941,49 @@ void MainWindow::run_queries() {
     current_query_text_->setEnabled(false);
     historical_query_text_->setEnabled(false);
     status_->setText(QString("Calculating %1 distinct variant(s) across %2 prepared BAM(s)…")
-        .arg(variants.size()).arg(bams.size()));
-    watcher_.setFuture(QtConcurrent::run([queries = std::move(variants), classified = std::move(classified),
-                                          errors = std::move(errors), filter_values = last_filters_, bams, engines] {
+        .arg(classified.size()).arg(bams.size()));
+    watcher_.setFuture(QtConcurrent::run([classified = std::move(classified), errors = std::move(errors),
+                                          filter_values = last_filters_, bams, engines,
+                                          cache_snapshot = std::move(cache_snapshot)] {
         MultiBamBatch combined;
         combined.batch.errors = errors;
         for (std::size_t source_index = 0; source_index < engines.size(); ++source_index) {
             const auto& bam = bams[static_cast<qsizetype>(source_index)];
-            try {
-                auto evaluated = engines[source_index]->evaluate(queries, filter_values);
-                for (auto& result : evaluated.results) {
-                    if (const auto* evidence = std::get_if<VariantEvidence>(&result)) {
-                        combined.result_variant_origins.push_back(origin_for(evidence->query, classified));
-                    } else {
-                        combined.result_variant_origins.push_back(VariantOrigin::current);
+            const auto bam_key = bam.toStdString();
+            const auto cached_bam = cache_snapshot.find(bam_key);
+            for (const auto& item : classified) {
+                const auto pair_key = evidence_cache_key(item.query, filter_values);
+                if (cached_bam != cache_snapshot.end()) {
+                    const auto cached = cached_bam->second.find(pair_key);
+                    if (cached != cached_bam->second.end()) {
+                        auto evidence = cached->second;
+                        evidence.query = item.query;
+                        combined.batch.results.emplace_back(std::move(evidence));
+                        combined.result_bams.append(bam);
+                        combined.result_variant_origins.push_back(item.origin);
+                        ++combined.cache_hits;
+                        continue;
                     }
-                    combined.batch.results.push_back(std::move(result));
+                }
+                ++combined.calculations;
+                try {
+                    auto evaluated = engines[source_index]->evaluate({Query{item.query}}, filter_values);
+                    for (auto& error : evaluated.errors) {
+                        combined.batch.errors.push_back("[" + resource_label(bam).toStdString() + "] " + error);
+                    }
+                    if (evaluated.results.empty()) continue;
+                    auto* result = std::get_if<VariantEvidence>(&evaluated.results.front());
+                    if (result == nullptr) continue;
+                    result->reads.clear();
+                    result->reads.shrink_to_fit();
+                    combined.cache_updates[bam_key][pair_key] = *result;
+                    combined.batch.results.emplace_back(std::move(*result));
                     combined.result_bams.append(bam);
+                    combined.result_variant_origins.push_back(item.origin);
+                } catch (const std::exception& error) {
+                    combined.batch.errors.push_back("[" + resource_label(bam).toStdString() + "] "
+                        + sanitized_error(error.what(), bam));
                 }
-                for (auto& error : evaluated.errors) {
-                    combined.batch.errors.push_back("[" + resource_label(bam).toStdString() + "] " + error);
-                }
-            } catch (const std::exception& error) {
-                combined.batch.errors.push_back("[" + resource_label(bam).toStdString() + "] "
-                    + sanitized_error(error.what(), bam));
             }
         }
         return combined;
@@ -978,10 +991,29 @@ void MainWindow::run_queries() {
 }
 
 void MainWindow::show_results() {
-    const auto combined = watcher_.result();
-    last_batch_ = combined.batch;
-    result_bam_paths_ = combined.result_bams;
-    result_variant_origins_ = combined.result_variant_origins;
+    auto combined = watcher_.result();
+    for (auto& [bam, entries] : combined.cache_updates) {
+        auto& destination = evidence_cache_[bam];
+        for (auto& [key, evidence] : entries) destination[key] = std::move(evidence);
+    }
+    last_batch_ = std::move(combined.batch);
+    result_bam_paths_ = std::move(combined.result_bams);
+    result_variant_origins_ = std::move(combined.result_variant_origins);
+    run_button_->setEnabled(true);
+    load_bams_button_->setEnabled(true);
+    loaded_bams_->setEnabled(true);
+    current_query_text_->setEnabled(true);
+    historical_query_text_->setEnabled(true);
+    refresh_loaded_bams();
+    render_results();
+    status_->setText(QString("%1 result(s) ready · %2 reused · %3 calculated · %4 issue(s)")
+        .arg(last_batch_.results.size()).arg(combined.cache_hits).arg(combined.calculations).arg(last_batch_.errors.size()));
+    if (!queued_receiver_bams_.isEmpty()) {
+        QTimer::singleShot(0, this, [this] { load_queued_receiver_bams(); });
+    }
+}
+
+void MainWindow::render_results() {
     results_->setRowCount(0);
     std::vector<std::size_t> order(last_batch_.results.size());
     for (std::size_t index = 0; index < order.size(); ++index) order[index] = index;
@@ -1019,25 +1051,26 @@ void MainWindow::show_results() {
             QString::number(count.other_reads),
             evidence->molecule_counts_available ? QString::number(count.other_molecules) : "N/A",
             QString("%1 / %2").arg(count.alternate_forward_reads).arg(count.alternate_reverse_reads)};
+        const auto diagnostic = QString("%1 overlapping alignment(s)\n%2 excluded by mapping quality or alignment flags\n"
+                                        "%3 without a callable allele\n%4 below baseQ %5\n%6 counted as REF, ALT, or OTHER/N")
+            .arg(evidence->overlapping_alignments)
+            .arg(evidence->filtered_alignments)
+            .arg(evidence->uncallable_alignments)
+            .arg(evidence->low_base_quality_alignments)
+            .arg(last_filters_.minimum_base_quality)
+            .arg(count.depth());
         for (int column = 0; column < values.size(); ++column) {
             auto* item = new QTableWidgetItem(values[column]);
             item->setTextAlignment(column >= 4 ? Qt::AlignCenter : Qt::AlignVCenter | Qt::AlignLeft);
             if (column == 0) item->setData(Qt::UserRole, current_bam);
             if (column == 1) item->setToolTip(sanitized_resource_uri(bam_path));
             if (column == 2) item->setData(Qt::UserRole, static_cast<int>(origin));
+            if (column == 3 || (column >= 4 && column <= 10)) item->setToolTip(diagnostic);
             results_->setItem(row, column, item);
         }
         narrative_evidence.push_back({resource_label(bam_path).toStdString(), current_bam, origin, *evidence});
     }
     apply_theme();
-    run_button_->setEnabled(true);
-    load_bams_button_->setEnabled(true);
-    loaded_bams_->setEnabled(true);
-    current_query_text_->setEnabled(true);
-    historical_query_text_->setEnabled(true);
-    refresh_loaded_bams();
-    status_->setText(QString("%1 result(s) ready · %2 issue(s)")
-        .arg(last_batch_.results.size()).arg(last_batch_.errors.size()));
     QString issue_text;
     for (const auto& error : last_batch_.errors) issue_text += QString::fromStdString(error) + '\n';
     status_->setToolTip(issue_text.trimmed());
@@ -1046,9 +1079,6 @@ void MainWindow::show_results() {
         ? "No comparison-specific narrative was generated. Variants listed in both sets are excluded, and historical-only variants require a current BAM."
         : narrative);
     copy_summary_button_->setEnabled(!narrative.isEmpty());
-    if (!queued_receiver_bams_.isEmpty()) {
-        QTimer::singleShot(0, this, [this] { load_queued_receiver_bams(); });
-    }
 }
 
 void MainWindow::copy_summary() {
