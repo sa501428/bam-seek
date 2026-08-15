@@ -39,7 +39,7 @@ if(BAM_SEEK_ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "AppleClang|Clan
 endif()
 
 if(BAM_SEEK_BUILD_GUI)
-    find_package(Qt6 6.5 REQUIRED COMPONENTS Concurrent Network Widgets)
+    find_package(Qt6 6.5 REQUIRED COMPONENTS Concurrent Network Svg Widgets)
     qt_standard_project_setup()
     qt_add_executable(bam-seek
         src/main.cpp
@@ -48,7 +48,17 @@ if(BAM_SEEK_BUILD_GUI)
         include/bamseek/igv_command_receiver.hpp
         include/bamseek/main_window.hpp
     )
-    target_link_libraries(bam-seek PRIVATE bamseek::core Qt6::Concurrent Qt6::Network Qt6::Widgets)
+    qt_add_resources(bam-seek bam_seek_resources
+        PREFIX "/"
+        FILES logo.svg
+    )
+    target_link_libraries(bam-seek PRIVATE
+        bamseek::core
+        Qt6::Concurrent
+        Qt6::Network
+        Qt6::Svg
+        Qt6::Widgets
+    )
     target_compile_definitions(bam-seek PRIVATE BAM_SEEK_VERSION="${PROJECT_VERSION}")
     set_target_properties(bam-seek PROPERTIES
         MACOSX_BUNDLE TRUE
@@ -59,10 +69,20 @@ if(BAM_SEEK_BUILD_GUI)
         WIN32_EXECUTABLE TRUE
     )
     if(APPLE)
-        set_target_properties(bam-seek PROPERTIES OUTPUT_NAME "BAM Seek")
+        set(bam_seek_macos_icon "${CMAKE_CURRENT_SOURCE_DIR}/packaging/icons/logo.icns")
+        set_source_files_properties("${bam_seek_macos_icon}" PROPERTIES
+            MACOSX_PACKAGE_LOCATION "Resources"
+        )
+        target_sources(bam-seek PRIVATE "${bam_seek_macos_icon}")
+        set_target_properties(bam-seek PROPERTIES
+            MACOSX_BUNDLE_ICON_FILE "logo.icns"
+            OUTPUT_NAME "BAM Seek"
+        )
     endif()
 
     if(WIN32)
+        set(BAM_SEEK_WINDOWS_ICON
+            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/icons/logo.ico")
         configure_file(
             packaging/windows/bam-seek.rc.in
             "${CMAKE_CURRENT_BINARY_DIR}/bam-seek.rc"

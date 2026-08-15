@@ -65,7 +65,7 @@ VAF calculation is read-only and runs on the local machine. BAM Seek does not up
 
 ## Build
 
-The default build expects this checkout beside `igv-cpp` and requires CMake 3.24+, a C++20 compiler, Qt 6.5+ (Widgets, Concurrent, and Network), HTSlib, zlib, and pkg-config.
+The default build expects this checkout beside `igv-cpp` and requires CMake 3.24+, a C++20 compiler, Qt 6.5+ (Widgets, Concurrent, Network, and SVG), HTSlib, zlib, and pkg-config.
 
 ### macOS
 

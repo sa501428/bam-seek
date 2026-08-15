@@ -125,6 +125,10 @@ elseif(WIN32)
 
     set(CPACK_NSIS_DISPLAY_NAME "BAM Seek ${PROJECT_VERSION}")
     set(CPACK_NSIS_PACKAGE_NAME "BAM Seek")
+    set(CPACK_NSIS_MUI_ICON
+        "${CMAKE_CURRENT_LIST_DIR}/../packaging/icons/logo.ico")
+    set(CPACK_NSIS_MUI_UNIICON
+        "${CMAKE_CURRENT_LIST_DIR}/../packaging/icons/logo.ico")
     set(CPACK_NSIS_INSTALLED_ICON_NAME "bam-seek.exe")
     set(CPACK_NSIS_MUI_FINISHPAGE_RUN "bam-seek.exe")
     set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
@@ -136,6 +140,8 @@ elseif(WIN32)
     # Keep this GUID stable across releases so Windows Installer upgrades an
     # existing BAM Seek installation instead of installing a second product.
     set(CPACK_WIX_UPGRADE_GUID "C09CB1C5-B734-4090-8A10-0DDD6470AAC7")
+    set(CPACK_WIX_PRODUCT_ICON
+        "${CMAKE_CURRENT_LIST_DIR}/../packaging/icons/logo.ico")
     set(CPACK_WIX_PROGRAM_MENU_FOLDER "BAM Seek")
     if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.30)
         set(CPACK_WIX_VERSION 4)
