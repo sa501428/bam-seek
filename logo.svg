@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Midnight and mint genomic read pileup</title>
+  <desc id="desc">Seven bold sequencing reads with three centered mint variant bases.</desc>
+  <g fill="#243746">
+    <rect x="98" y="74" width="342" height="40" rx="20"/>
+    <rect x="42" y="128" width="386" height="40" rx="20"/>
+    <rect x="76" y="182" width="400" height="40" rx="20"/>
+    <rect x="128" y="236" width="300" height="40" rx="20"/>
+    <rect x="54" y="290" width="390" height="40" rx="20"/>
+    <rect x="116" y="344" width="348" height="40" rx="20"/>
+    <rect x="70" y="398" width="324" height="40" rx="20"/>
+  </g>
+  <g fill="#43F2B3">
+    <rect x="240" y="74" width="32" height="40"/>
+    <rect x="240" y="128" width="32" height="40"/>
+    <rect x="240" y="182" width="32" height="40"/>
+  </g>
+</svg>
