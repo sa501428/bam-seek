@@ -66,6 +66,13 @@ std::string annotated_name(const VariantQuery& query) {
         + query.reference + '>' + query.alternate;
 }
 
+std::string phase_variant_name(const VariantQuery& query) {
+    if (!query.coding_change.empty()) return query.coding_change;
+    if (!query.protein_change.empty()) return query.protein_change;
+    return query.contig + ':' + std::to_string(query.position + 1) + ' '
+        + query.reference + '>' + query.alternate;
+}
+
 std::string evidence_item(const VariantEvidence& evidence, const bool force_zero_reads, const bool include_molecules) {
     const auto& counts = evidence.counts;
     std::string label = annotated_name(evidence.query);
@@ -173,6 +180,34 @@ std::string comparison_narrative(const std::vector<ComparativeEvidence>& evidenc
         joined << paragraphs[index];
     }
     return joined.str();
+}
+
+std::string phasing_narrative(const std::vector<ComparativePhaseEvidence>& evidence) {
+    if (evidence.empty()) return {};
+    std::ostringstream output;
+    output << "Read-based phasing:";
+    for (const auto& item : evidence) {
+        const auto& phase = item.evidence;
+        const auto sample = item.bam_is_current ? "current sample " : "historical sample ";
+        const auto gene = phase.gene.empty() ? std::string("Unannotated") : phase.gene;
+        output << "\n" << sample << item.bam_name << ": " << gene << ' '
+               << phase_variant_name(phase.first) << " and " << phase_variant_name(phase.second) << ' ';
+        switch (phase.classification) {
+            case PhaseClassification::cis: output << "are in cis"; break;
+            case PhaseClassification::trans: output << "are in trans"; break;
+            case PhaseClassification::indeterminate: output << "have indeterminate phase"; break;
+            case PhaseClassification::too_far_apart: output << "are too far apart to phase"; break;
+        }
+        output << " (";
+        if (phase.genomic_distance >= 0) output << phase.genomic_distance << " bp apart; ";
+        output << phase.counts.informative_molecules() << " informative molecule(s); "
+               << "AB=" << phase.counts.alternate_alternate
+               << ", Ab=" << phase.counts.alternate_reference
+               << ", aB=" << phase.counts.reference_alternate
+               << ", ab=" << phase.counts.reference_reference << ").";
+        if (!phase.reason.empty()) output << ' ' << phase.reason;
+    }
+    return output.str();
 }
 
 }  // namespace bamseek

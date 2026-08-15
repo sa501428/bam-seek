@@ -15,6 +15,10 @@ namespace {
 
 constexpr std::uint16_t flag_unmapped = 0x4;
 constexpr std::uint16_t flag_reverse = 0x10;
+constexpr std::uint16_t flag_paired = 0x1;
+constexpr std::uint16_t flag_proper_pair = 0x2;
+constexpr std::uint16_t flag_first_mate = 0x40;
+constexpr std::uint16_t flag_second_mate = 0x80;
 constexpr std::uint16_t flag_secondary = 0x100;
 constexpr std::uint16_t flag_duplicate = 0x400;
 constexpr std::uint16_t flag_supplementary = 0x800;
@@ -31,8 +35,11 @@ void validate_filters(const FilterSettings& filters) {
     if (filters.minimum_mapping_quality < 0 || filters.minimum_mapping_quality > 255
         || filters.minimum_base_quality < 0 || filters.minimum_base_quality > 255
         || filters.minimum_alternate_reads < 1 || filters.minimum_alternate_molecules < 1
+        || filters.minimum_phasing_support < 1
         || !std::isfinite(filters.minimum_variant_allele_fraction)
-        || filters.minimum_variant_allele_fraction < 0.0 || filters.minimum_variant_allele_fraction > 1.0) {
+        || filters.minimum_variant_allele_fraction < 0.0 || filters.minimum_variant_allele_fraction > 1.0
+        || !std::isfinite(filters.maximum_phasing_conflict_fraction)
+        || filters.maximum_phasing_conflict_fraction < 0.0 || filters.maximum_phasing_conflict_fraction > 1.0) {
         throw std::invalid_argument("Evidence filter settings are outside their valid ranges.");
     }
     if (filters.molecule_mode != MoleculeMode::raw_reads && filters.molecule_mode != MoleculeMode::auto_detect
@@ -297,6 +304,15 @@ std::string fragment_key(const igv::Alignment& alignment) {
     return key.str();
 }
 
+std::string alignment_record_key(const igv::Alignment& alignment) {
+    std::ostringstream key;
+    key << alignment.name << '|' << alignment.interval.contig << ':' << alignment.interval.start << '-'
+        << alignment.interval.end << '|' << alignment.flags << '|';
+    for (const auto& operation : alignment.cigar) key << operation.length << operation.operation;
+    key << '|' << alignment.sequence;
+    return key.str();
+}
+
 void add_count(EvidenceCounts& counts, const Allele allele, const bool reverse) {
     switch (allele) {
         case Allele::reference:
@@ -318,6 +334,15 @@ void add_molecule_count(EvidenceCounts& counts, const Allele allele) {
         case Allele::alternate: ++counts.alternate_molecules; break;
         case Allele::other: case Allele::no_call: ++counts.other_molecules; break;
     }
+}
+
+Allele consensus_allele(const std::vector<Allele>& calls) {
+    const auto alt = static_cast<int>(std::count(calls.begin(), calls.end(), Allele::alternate));
+    const auto ref = static_cast<int>(std::count(calls.begin(), calls.end(), Allele::reference));
+    const auto other = static_cast<int>(std::count(calls.begin(), calls.end(), Allele::other));
+    return alt > ref && alt > other ? Allele::alternate
+        : ref > alt && ref > other ? Allele::reference
+        : Allele::other;
 }
 
 VariantEvidence evaluate_variant(const igv::AlignmentReader& reader, const VariantQuery& variant, const FilterSettings& filters) {
@@ -372,13 +397,7 @@ VariantEvidence evaluate_variant(const igv::AlignmentReader& reader, const Varia
     }
     for (const auto& [identifier, calls] : molecule_calls) {
         (void)identifier;
-        const auto alt = static_cast<int>(std::count(calls.begin(), calls.end(), Allele::alternate));
-        const auto ref = static_cast<int>(std::count(calls.begin(), calls.end(), Allele::reference));
-        const auto other = static_cast<int>(std::count(calls.begin(), calls.end(), Allele::other));
-        add_molecule_count(evidence.counts,
-            alt > ref && alt > other ? Allele::alternate
-            : ref > alt && ref > other ? Allele::reference
-            : Allele::other);
+        add_molecule_count(evidence.counts, consensus_allele(calls));
     }
     evidence.molecule_counts_available = !molecule_calls.empty();
     evidence.molecule_tag_used = selected_tag.empty() ? "paired fragments by read name" : selected_tag;
@@ -453,12 +472,222 @@ std::string allele_name(const Allele allele) {
     return "UNKNOWN";
 }
 
+std::string phase_name(const PhaseClassification classification) {
+    switch (classification) {
+        case PhaseClassification::cis: return "cis";
+        case PhaseClassification::trans: return "trans";
+        case PhaseClassification::indeterminate: return "indeterminate";
+        case PhaseClassification::too_far_apart: return "too far apart to phase";
+    }
+    return "indeterminate";
+}
+
 EvidenceEngine::EvidenceEngine(igv::Resource resource) : reader_(open_allowed_alignments(resource)) {
     if (!reader_->indexed()) throw std::runtime_error("An indexed BAM, CRAM, or SAM resource is required (.bai, .csi, or .crai).");
     if (resource.reference_uri) reference_ = igv::open_fasta({.uri = *resource.reference_uri});
 }
 
 bool EvidenceEngine::indexed() const noexcept { return reader_->indexed(); }
+
+PhaseEvidence EvidenceEngine::phase_pair(
+    const VariantQuery& first, const VariantQuery& second, const FilterSettings& filters) const {
+    validate_filters(filters);
+    validate_variant_shape(first);
+    validate_variant_shape(second);
+
+    PhaseEvidence evidence;
+    evidence.first = first;
+    evidence.second = second;
+    evidence.gene = first.gene.empty() ? second.gene : first.gene;
+
+    const auto first_contig = resolve_contig(reader_->sequences(), first.contig);
+    const auto second_contig = resolve_contig(reader_->sequences(), second.contig);
+    if (!first_contig) throw std::invalid_argument("Phasing contig is not present in the alignment header: " + first.contig);
+    if (!second_contig) throw std::invalid_argument("Phasing contig is not present in the alignment header: " + second.contig);
+    evidence.first.contig = *first_contig;
+    evidence.second.contig = *second_contig;
+
+    const auto validate_bounds_and_reference = [this](const VariantQuery& query, const std::string& requested_contig) {
+        const auto sequence = std::find_if(reader_->sequences().begin(), reader_->sequences().end(), [&](const auto& item) {
+            return item.name == query.contig;
+        });
+        if (sequence == reader_->sequences().end()
+            || query.position + static_cast<std::int64_t>(query.reference.size()) > sequence->length) {
+            throw std::invalid_argument("Phasing variant is outside the contig bounds.");
+        }
+        if (!reference_) return;
+        const auto reference_contig = resolve_contig(reference_->sequences(), requested_contig);
+        if (!reference_contig) {
+            throw std::invalid_argument("Phasing contig is not present in the configured reference: " + requested_contig);
+        }
+        auto observed = reference_->get({*reference_contig, query.position,
+            query.position + static_cast<std::int64_t>(query.reference.size())});
+        std::transform(observed.begin(), observed.end(), observed.begin(), [](const unsigned char base) {
+            return static_cast<char>(std::toupper(base));
+        });
+        if (observed != query.reference) {
+            throw std::invalid_argument("Phasing query REF allele does not match the configured reference (observed "
+                + observed + ").");
+        }
+    };
+    validate_bounds_and_reference(evidence.first, first.contig);
+    validate_bounds_and_reference(evidence.second, second.contig);
+
+    if (*first_contig != *second_contig) {
+        evidence.classification = PhaseClassification::too_far_apart;
+        evidence.reason = "The variants are on different contigs, so no sequenced molecule can link them.";
+        return evidence;
+    }
+    evidence.genomic_distance = evidence.first.position > evidence.second.position
+        ? evidence.first.position - evidence.second.position
+        : evidence.second.position - evidence.first.position;
+
+    const auto first_alignments = reader_->get(evidence.first.query_window(0));
+    const auto second_alignments = reader_->get(evidence.second.query_window(0));
+    struct CalledAlignment {
+        const igv::Alignment* alignment{};
+        int locus{};
+        Allele allele = Allele::no_call;
+    };
+    std::vector<CalledAlignment> called_alignments;
+    std::vector<const igv::Alignment*> callable_alignments;
+    const auto collect_calls = [&](const auto& alignments, const VariantQuery& variant, const int locus) {
+        for (const auto& alignment : alignments) {
+            if (!include_alignment(alignment, filters)) continue;
+            const auto call = call_allele(alignment, variant);
+            if (call.allele == Allele::no_call || call.minimum_base_quality < filters.minimum_base_quality) continue;
+            called_alignments.push_back({&alignment, locus, call.allele});
+            callable_alignments.push_back(&alignment);
+        }
+    };
+    collect_calls(first_alignments, evidence.first, 0);
+    collect_calls(second_alignments, evidence.second, 1);
+
+    const auto selected_tag = choose_tag(callable_alignments, filters);
+    struct PhaseCall {
+        Allele allele = Allele::no_call;
+        std::string alignment_record;
+        std::uint16_t flags{};
+    };
+    struct MoleculeCalls {
+        std::vector<PhaseCall> first;
+        std::vector<PhaseCall> second;
+        bool grouped_by_tag = false;
+    };
+    std::unordered_map<std::string, MoleculeCalls> molecule_calls;
+    bool used_fragment_fallback = false;
+    for (const auto& called : called_alignments) {
+        auto molecule_id = selected_tag.empty() ? std::string{} : molecule_key(*called.alignment, selected_tag);
+        const bool grouped_by_tag = !molecule_id.empty();
+        if (molecule_id.empty()) {
+            if (!selected_tag.empty()) ++evidence.reads_missing_molecule_tag;
+            molecule_id = fragment_key(*called.alignment);
+            used_fragment_fallback = true;
+        }
+        auto& calls = molecule_calls[molecule_id];
+        calls.grouped_by_tag = calls.grouped_by_tag || grouped_by_tag;
+        (called.locus == 0 ? calls.first : calls.second).push_back(
+            {called.allele, alignment_record_key(*called.alignment), called.alignment->flags});
+    }
+    evidence.molecule_tag_used = selected_tag.empty() ? "paired fragments by read name" : selected_tag;
+    if (!selected_tag.empty() && used_fragment_fallback) evidence.molecule_tag_used += " + pair fallback";
+
+    const auto is_informative_allele = [](const Allele allele) {
+        return allele == Allele::reference || allele == Allele::alternate;
+    };
+    for (const auto& [identifier, calls] : molecule_calls) {
+        (void)identifier;
+        const bool same_read_observes_both = std::any_of(calls.first.begin(), calls.first.end(), [&](const auto& first_call) {
+            return std::any_of(calls.second.begin(), calls.second.end(), [&](const auto& second_call) {
+                return first_call.alignment_record == second_call.alignment_record;
+            });
+        });
+        const bool valid_read_pair_observes_both = std::any_of(calls.first.begin(), calls.first.end(), [&](const auto& first_call) {
+            return std::any_of(calls.second.begin(), calls.second.end(), [&](const auto& second_call) {
+                const bool valid_flags = (first_call.flags & (flag_paired | flag_proper_pair))
+                        == (flag_paired | flag_proper_pair)
+                    && (second_call.flags & (flag_paired | flag_proper_pair)) == (flag_paired | flag_proper_pair);
+                const bool opposite_mates = ((first_call.flags & flag_first_mate) != 0
+                        && (second_call.flags & flag_second_mate) != 0)
+                    || ((first_call.flags & flag_second_mate) != 0
+                        && (second_call.flags & flag_first_mate) != 0);
+                return valid_flags && opposite_mates;
+            });
+        });
+        if (!calls.grouped_by_tag && !same_read_observes_both && !valid_read_pair_observes_both) {
+            ++evidence.counts.noninformative_molecules;
+            continue;
+        }
+        const auto phase_consensus = [](const std::vector<PhaseCall>& observations) {
+            std::vector<Allele> alleles;
+            alleles.reserve(observations.size());
+            for (const auto& observation : observations) alleles.push_back(observation.allele);
+            return consensus_allele(alleles);
+        };
+        const auto first_call = phase_consensus(calls.first);
+        const auto second_call = phase_consensus(calls.second);
+        if (!is_informative_allele(first_call) || !is_informative_allele(second_call)) {
+            ++evidence.counts.noninformative_molecules;
+            continue;
+        }
+        if (first_call == Allele::alternate && second_call == Allele::alternate) {
+            ++evidence.counts.alternate_alternate;
+        } else if (first_call == Allele::alternate) {
+            ++evidence.counts.alternate_reference;
+        } else if (second_call == Allele::alternate) {
+            ++evidence.counts.reference_alternate;
+        } else {
+            ++evidence.counts.reference_reference;
+        }
+    }
+
+    const auto informative = evidence.counts.informative_molecules();
+    evidence.direct_phasing_possible = informative > 0;
+    if (!evidence.direct_phasing_possible) {
+        evidence.classification = PhaseClassification::too_far_apart;
+        evidence.reason = "No high-quality molecule directly observed both variant positions.";
+        return evidence;
+    }
+
+    const int cis_support = evidence.counts.cis_supporting_molecules();
+    const int trans_support = evidence.counts.trans_supporting_molecules();
+    const int alternate_bearing = cis_support + trans_support;
+    if (alternate_bearing == 0) {
+        evidence.classification = PhaseClassification::indeterminate;
+        evidence.reason = "Molecules span both positions, but none contains either alternate allele.";
+        return evidence;
+    }
+    const auto cis_conflict_fraction = static_cast<double>(trans_support) / static_cast<double>(alternate_bearing);
+    const auto trans_conflict_fraction = static_cast<double>(cis_support) / static_cast<double>(alternate_bearing);
+    const bool cis_call = cis_support >= filters.minimum_phasing_support
+        && cis_conflict_fraction <= filters.maximum_phasing_conflict_fraction;
+    const bool trans_call = evidence.counts.alternate_reference >= filters.minimum_phasing_support
+        && evidence.counts.reference_alternate >= filters.minimum_phasing_support
+        && trans_conflict_fraction <= filters.maximum_phasing_conflict_fraction;
+
+    if (cis_call && !trans_call) {
+        evidence.classification = PhaseClassification::cis;
+        evidence.discordant_molecules = trans_support;
+        evidence.discordant_fraction = cis_conflict_fraction;
+        evidence.reason = "ALT/ALT molecules meet the configured support and conflict thresholds.";
+    } else if (trans_call && !cis_call) {
+        evidence.classification = PhaseClassification::trans;
+        evidence.discordant_molecules = cis_support;
+        evidence.discordant_fraction = trans_conflict_fraction;
+        evidence.reason = "Reciprocal ALT/REF and REF/ALT molecules meet the configured support and conflict thresholds.";
+    } else {
+        evidence.classification = PhaseClassification::indeterminate;
+        evidence.discordant_molecules = std::min(cis_support, trans_support);
+        evidence.discordant_fraction = static_cast<double>(evidence.discordant_molecules)
+            / static_cast<double>(alternate_bearing);
+        if (cis_support > 0 && trans_support > 0) {
+            evidence.reason = "Conflicting cis- and trans-supporting molecules exceed the configured conflict threshold.";
+        } else {
+            evidence.reason = "Direct linkage was observed, but the configured molecule-support threshold was not met.";
+        }
+    }
+    return evidence;
+}
 
 PileupData EvidenceEngine::pileup(const VariantQuery& query, const FilterSettings& filters, const std::int64_t padding) const {
     validate_filters(filters);

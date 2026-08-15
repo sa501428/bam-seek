@@ -75,5 +75,33 @@ int main() {
         std::cerr << "Plural comparison grammar failed\n" << plural_narrative << '\n';
         return EXIT_FAILURE;
     }
+
+    bamseek::PhaseEvidence cis_phase;
+    cis_phase.first = variant("JAK2", "c.1849G>T", "p.V617F", "chr9", 5073769);
+    cis_phase.second = variant("JAK2", "c.1860C>A", "p.D620E", "chr9", 5073780);
+    cis_phase.gene = "JAK2";
+    cis_phase.genomic_distance = 11;
+    cis_phase.direct_phasing_possible = true;
+    cis_phase.counts.alternate_alternate = 3;
+    cis_phase.counts.reference_reference = 7;
+    cis_phase.classification = bamseek::PhaseClassification::cis;
+    cis_phase.reason = "ALT/ALT molecules meet the configured support and conflict thresholds.";
+    auto too_far_phase = cis_phase;
+    too_far_phase.first = variant("TET2", "c.100A>T", {}, "chr4", 100);
+    too_far_phase.second = variant("TET2", "c.900A>T", {}, "chr4", 900);
+    too_far_phase.gene = "TET2";
+    too_far_phase.genomic_distance = 800;
+    too_far_phase.direct_phasing_possible = false;
+    too_far_phase.counts = {};
+    too_far_phase.classification = bamseek::PhaseClassification::too_far_apart;
+    too_far_phase.reason = "No high-quality molecule directly observed both variant positions.";
+    const auto phase_text = bamseek::phasing_narrative({
+        {"current.bam", true, cis_phase}, {"old-A.bam", false, too_far_phase}});
+    if (phase_text.find("JAK2 c.1849G>T and c.1860C>A are in cis") == std::string::npos
+        || phase_text.find("AB=3, Ab=0, aB=0, ab=7") == std::string::npos
+        || phase_text.find("TET2 c.100A>T and c.900A>T are too far apart to phase") == std::string::npos) {
+        std::cerr << "Phasing narrative failed\n" << phase_text << '\n';
+        return EXIT_FAILURE;
+    }
     return EXIT_SUCCESS;
 }

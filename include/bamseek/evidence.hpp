@@ -15,6 +15,7 @@ namespace bamseek {
 // raw_reads groups alignments into paired fragments by read name; it does not use a UMI.
 enum class MoleculeMode { raw_reads, auto_detect, selected_tag };
 enum class Allele { reference, alternate, other, no_call };
+enum class PhaseClassification { cis, trans, indeterminate, too_far_apart };
 
 struct FilterSettings {
     int minimum_mapping_quality = 20;
@@ -25,6 +26,8 @@ struct FilterSettings {
     double minimum_variant_allele_fraction = 0.0;
     int minimum_alternate_reads = 1;
     int minimum_alternate_molecules = 1;
+    int minimum_phasing_support = 2;
+    double maximum_phasing_conflict_fraction = 0.1;
     MoleculeMode molecule_mode = MoleculeMode::raw_reads;
     std::string molecule_tag;
 };
@@ -84,6 +87,37 @@ struct RegionEvidence {
     std::vector<VariantEvidence> candidates;
 };
 
+struct PhaseCounts {
+    int alternate_alternate{};  // AB
+    int alternate_reference{};  // Ab
+    int reference_alternate{};  // aB
+    int reference_reference{};  // ab
+    int noninformative_molecules{};
+
+    [[nodiscard]] int informative_molecules() const noexcept {
+        return alternate_alternate + alternate_reference + reference_alternate + reference_reference;
+    }
+    [[nodiscard]] int cis_supporting_molecules() const noexcept { return alternate_alternate; }
+    [[nodiscard]] int trans_supporting_molecules() const noexcept {
+        return alternate_reference + reference_alternate;
+    }
+};
+
+struct PhaseEvidence {
+    VariantQuery first;
+    VariantQuery second;
+    std::string gene;
+    std::int64_t genomic_distance = -1;
+    bool direct_phasing_possible = false;
+    PhaseCounts counts;
+    PhaseClassification classification = PhaseClassification::indeterminate;
+    int discordant_molecules{};
+    double discordant_fraction{};
+    std::string molecule_tag_used;
+    int reads_missing_molecule_tag{};
+    std::string reason;
+};
+
 using QueryEvidence = std::variant<VariantEvidence, RegionEvidence>;
 
 struct BatchEvidence {
@@ -107,6 +141,8 @@ public:
     explicit EvidenceEngine(igv::Resource resource);
     [[nodiscard]] bool indexed() const noexcept;
     [[nodiscard]] BatchEvidence evaluate(const std::vector<Query>& queries, const FilterSettings& filters) const;
+    [[nodiscard]] PhaseEvidence phase_pair(
+        const VariantQuery& first, const VariantQuery& second, const FilterSettings& filters) const;
     [[nodiscard]] PileupData pileup(const VariantQuery& query, const FilterSettings& filters, std::int64_t padding = 80) const;
 
 private:
@@ -115,5 +151,6 @@ private:
 };
 
 [[nodiscard]] std::string allele_name(Allele allele);
+[[nodiscard]] std::string phase_name(PhaseClassification classification);
 
 }  // namespace bamseek

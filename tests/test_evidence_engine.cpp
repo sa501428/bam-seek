@@ -147,6 +147,49 @@ int main() {
         return EXIT_FAILURE;
     }
 
+    auto phase_filters = raw_filters;
+    phase_filters.minimum_phasing_support = 2;
+    phase_filters.maximum_phasing_conflict_fraction = 0.1;
+    const auto phase_variant = [](const char* label, const std::int64_t position, const char* alternate) {
+        return bamseek::VariantQuery{label, "chr1", position, "A", alternate, "PHASE1"};
+    };
+    const auto cis = evidence_engine.phase_pair(
+        phase_variant("PHASE1 c.2A>C", 1, "C"), phase_variant("PHASE1 c.7A>G", 6, "G"), phase_filters);
+    if (cis.classification != bamseek::PhaseClassification::cis || !cis.direct_phasing_possible
+        || cis.genomic_distance != 5 || cis.counts.alternate_alternate != 2
+        || cis.counts.reference_reference != 2 || cis.counts.informative_molecules() != 4
+        || cis.discordant_molecules != 0 || bamseek::phase_name(cis.classification) != "cis") {
+        std::cerr << "Paired-fragment cis phasing regression\n";
+        return EXIT_FAILURE;
+    }
+
+    const auto trans = evidence_engine.phase_pair(
+        phase_variant("PHASE1 c.46A>C", 45, "C"), phase_variant("PHASE1 c.51A>G", 50, "G"), phase_filters);
+    if (trans.classification != bamseek::PhaseClassification::trans || !trans.direct_phasing_possible
+        || trans.counts.alternate_reference != 2 || trans.counts.reference_alternate != 2
+        || trans.counts.alternate_alternate != 0 || trans.counts.informative_molecules() != 4
+        || trans.discordant_molecules != 0 || bamseek::phase_name(trans.classification) != "trans") {
+        std::cerr << "Reciprocal trans phasing regression\n";
+        return EXIT_FAILURE;
+    }
+
+    const auto underpowered = evidence_engine.phase_pair(
+        phase_variant("PHASE1 c.62A>C", 61, "C"), phase_variant("PHASE1 c.67A>G", 66, "G"), phase_filters);
+    if (underpowered.classification != bamseek::PhaseClassification::indeterminate
+        || underpowered.counts.alternate_alternate != 1 || !underpowered.direct_phasing_possible) {
+        std::cerr << "Underpowered phase evidence must remain indeterminate\n";
+        return EXIT_FAILURE;
+    }
+
+    const auto unsequenced_gap = evidence_engine.phase_pair(
+        phase_variant("PHASE1 c.5A>T", 4, "T"), phase_variant("PHASE1 c.7A>G", 6, "G"), phase_filters);
+    if (unsequenced_gap.classification != bamseek::PhaseClassification::too_far_apart
+        || unsequenced_gap.direct_phasing_possible || unsequenced_gap.counts.informative_molecules() != 0
+        || bamseek::phase_name(unsequenced_gap.classification) != "too far apart to phase") {
+        std::cerr << "An inferred insert gap must not be treated as observed sequence\n";
+        return EXIT_FAILURE;
+    }
+
     const auto alias_cache_key = bamseek::evidence_cache_key(
         bamseek::VariantQuery{"1:85 A>AT", "1", 84, "A", "AT"}, raw_filters);
     const auto canonical_cache_key = bamseek::evidence_cache_key(
@@ -176,6 +219,20 @@ int main() {
     }
     if (!rejected_invalid_filters) {
         std::cerr << "Invalid filter ranges must be rejected\n";
+        return EXIT_FAILURE;
+    }
+    auto invalid_phase_filters = raw_filters;
+    invalid_phase_filters.maximum_phasing_conflict_fraction = 1.1;
+    bool rejected_invalid_phase_filters = false;
+    try {
+        (void)evidence_engine.phase_pair(
+            phase_variant("PHASE1 c.2A>C", 1, "C"), phase_variant("PHASE1 c.7A>G", 6, "G"),
+            invalid_phase_filters);
+    } catch (const std::invalid_argument&) {
+        rejected_invalid_phase_filters = true;
+    }
+    if (!rejected_invalid_phase_filters) {
+        std::cerr << "Invalid phasing thresholds must be rejected\n";
         return EXIT_FAILURE;
     }
 

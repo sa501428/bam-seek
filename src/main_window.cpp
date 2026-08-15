@@ -8,6 +8,7 @@
 #include <QClipboard>
 #include <QComboBox>
 #include <QDateTime>
+#include <QDoubleValidator>
 #include <QDragEnterEvent>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -40,7 +41,10 @@
 #include <QtConcurrentRun>
 
 #include <algorithm>
+#include <cctype>
+#include <map>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 
 namespace bamseek {
@@ -59,6 +63,33 @@ QString display_query(const VariantQuery& query) {
     }
     if (!query.protein_change.empty()) clinical += ' ' + QString::fromStdString(query.protein_change);
     return clinical + "  ·  " + genomic;
+}
+
+std::string normalized_gene(std::string gene) {
+    std::transform(gene.begin(), gene.end(), gene.begin(), [](const unsigned char character) {
+        return static_cast<char>(std::toupper(character));
+    });
+    return gene;
+}
+
+QString display_phase_name(const PhaseClassification classification) {
+    switch (classification) {
+        case PhaseClassification::cis: return "Cis";
+        case PhaseClassification::trans: return "Trans";
+        case PhaseClassification::indeterminate: return "Indeterminate";
+        case PhaseClassification::too_far_apart: return "Too far apart to phase";
+    }
+    return "Indeterminate";
+}
+
+bool same_genomic_allele(const VariantQuery& left, const VariantQuery& right) {
+    auto left_contig = normalized_gene(left.contig);
+    auto right_contig = normalized_gene(right.contig);
+    if (left_contig.starts_with("CHR")) left_contig.erase(0, 3);
+    if (right_contig.starts_with("CHR")) right_contig.erase(0, 3);
+    return left_contig == right_contig && left.position == right.position
+        && normalized_gene(left.reference) == normalized_gene(right.reference)
+        && normalized_gene(left.alternate) == normalized_gene(right.alternate);
 }
 
 QString sanitized_resource_uri(const QString& path) {
@@ -478,6 +509,33 @@ MainWindow::MainWindow() {
     results_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     results_->setMinimumHeight(100);
     results_layout->addWidget(results_, 1);
+    phasing_title_ = section_title("Read-based phasing", results_card);
+    phasing_title_->setVisible(false);
+    results_layout->addWidget(phasing_title_);
+    phasing_results_ = new QTableWidget(results_card);
+    phasing_results_->setColumnCount(11);
+    phasing_results_->setHorizontalHeaderLabels({"Sample", "BAM", "Gene", "Variant pair", "Distance", "Phase",
+        "Informative", "AB", "Ab", "aB", "ab"});
+    const QStringList phase_header_tips{"Current or historical sample", "BAM source", "Gene", "Pair evaluated",
+        "Distance between variant starts", "Pairwise phase classification", "Independent molecules callable at both loci",
+        "ALT / ALT molecules", "ALT / REF molecules", "REF / ALT molecules", "REF / REF molecules"};
+    for (int column = 0; column < phase_header_tips.size(); ++column) {
+        phasing_results_->horizontalHeaderItem(column)->setToolTip(phase_header_tips[column]);
+    }
+    phasing_results_->setAlternatingRowColors(true);
+    phasing_results_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    phasing_results_->setSelectionMode(QAbstractItemView::SingleSelection);
+    phasing_results_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    phasing_results_->setShowGrid(false);
+    phasing_results_->verticalHeader()->setVisible(false);
+    phasing_results_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    phasing_results_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Fixed);
+    phasing_results_->horizontalHeader()->resizeSection(1, 190);
+    phasing_results_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    phasing_results_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    phasing_results_->setMinimumHeight(100);
+    phasing_results_->setVisible(false);
+    results_layout->addWidget(phasing_results_, 1);
     auto* summary_panel = new QFrame(results_card);
     summary_panel->setObjectName("SummaryPanel");
     auto* summary_layout = new QVBoxLayout(summary_panel);
@@ -578,6 +636,30 @@ MainWindow::MainWindow() {
     evidence_settings_layout->addWidget(muted_label(
         "Auto-detect uses MI, RX, or UB when at least 90% of callable alignments carry the tag; otherwise reads are grouped into paired fragments.",
         evidence_settings_card));
+    auto* phasing_controls = new QHBoxLayout();
+    phasing_controls->addWidget(muted_label("Minimum phase-supporting molecules", evidence_settings_card));
+    minimum_phasing_support_ = new QLineEdit(
+        QString::number(stored_settings.value("analysis/minimum_phasing_support", 2).toInt()), evidence_settings_card);
+    minimum_phasing_support_->setValidator(new QIntValidator(1, 1000000, minimum_phasing_support_));
+    minimum_phasing_support_->setAlignment(Qt::AlignCenter);
+    minimum_phasing_support_->setMaximumWidth(72);
+    phasing_controls->addWidget(minimum_phasing_support_);
+    phasing_controls->addSpacing(22);
+    phasing_controls->addWidget(muted_label("Maximum conflicting molecules", evidence_settings_card));
+    maximum_phasing_conflict_percent_ = new QLineEdit(
+        QString::number(stored_settings.value("analysis/maximum_phasing_conflict_percent", 10.0).toDouble(), 'g', 4),
+        evidence_settings_card);
+    maximum_phasing_conflict_percent_->setValidator(
+        new QDoubleValidator(0.0, 100.0, 3, maximum_phasing_conflict_percent_));
+    maximum_phasing_conflict_percent_->setAlignment(Qt::AlignCenter);
+    maximum_phasing_conflict_percent_->setMaximumWidth(72);
+    phasing_controls->addWidget(maximum_phasing_conflict_percent_);
+    phasing_controls->addWidget(muted_label("%", evidence_settings_card));
+    phasing_controls->addStretch(1);
+    evidence_settings_layout->addLayout(phasing_controls);
+    evidence_settings_layout->addWidget(muted_label(
+        "Phasing is attempted automatically for every pair when a gene has at least two variants. Cis requires ALT/ALT support; trans requires reciprocal ALT/REF and REF/ALT support.",
+        evidence_settings_card));
     settings_layout->addWidget(evidence_settings_card);
 
     auto* receiver_card = new QFrame(settings_content);
@@ -647,6 +729,8 @@ MainWindow::MainWindow() {
     const auto save_analysis = [this] { save_analysis_settings(); };
     connect(minimum_mapq_, &QLineEdit::editingFinished, this, save_analysis);
     connect(minimum_baseq_, &QLineEdit::editingFinished, this, save_analysis);
+    connect(minimum_phasing_support_, &QLineEdit::editingFinished, this, save_analysis);
+    connect(maximum_phasing_conflict_percent_, &QLineEdit::editingFinished, this, save_analysis);
     connect(include_duplicates_, &QCheckBox::toggled, this, save_analysis);
     connect(include_secondary_, &QCheckBox::toggled, this, save_analysis);
     connect(include_supplementary_, &QCheckBox::toggled, this, save_analysis);
@@ -730,6 +814,18 @@ void MainWindow::apply_theme() {
             if (results_->item(row, 9) != nullptr) results_->item(row, 9)->setForeground(accent);
         }
     }
+    if (phasing_results_ != nullptr) {
+        const QColor accent(dark_mode_ ? "#b8adff" : "#5b48d6");
+        const QColor current_color(dark_mode_ ? "#c8c1ff" : "#5541c8");
+        const QColor historical_color(dark_mode_ ? "#8fddd2" : "#087568");
+        for (int row = 0; row < phasing_results_->rowCount(); ++row) {
+            if (phasing_results_->item(row, 0) != nullptr) {
+                phasing_results_->item(row, 0)->setForeground(
+                    phasing_results_->item(row, 0)->data(Qt::UserRole).toBool() ? current_color : historical_color);
+            }
+            if (phasing_results_->item(row, 5) != nullptr) phasing_results_->item(row, 5)->setForeground(accent);
+        }
+    }
 }
 
 void MainWindow::set_receiver_enabled(const bool enabled) {
@@ -767,6 +863,12 @@ void MainWindow::save_analysis_settings() {
     }
     if (minimum_baseq_->hasAcceptableInput()) {
         settings.setValue("analysis/minimum_base_quality", minimum_baseq_->text().toInt());
+    }
+    if (minimum_phasing_support_->hasAcceptableInput()) {
+        settings.setValue("analysis/minimum_phasing_support", minimum_phasing_support_->text().toInt());
+    }
+    if (maximum_phasing_conflict_percent_->hasAcceptableInput()) {
+        settings.setValue("analysis/maximum_phasing_conflict_percent", maximum_phasing_conflict_percent_->text().toDouble());
     }
     settings.setValue("analysis/include_duplicates", include_duplicates_->isChecked());
     settings.setValue("analysis/include_secondary", include_secondary_->isChecked());
@@ -1006,19 +1108,24 @@ void MainWindow::set_current_bam(QListWidgetItem* changed_item) {
     }
     refreshing_bam_list_ = false;
     apply_theme();
-    const bool has_results = !last_batch_.results.empty();
+    const bool has_results = !last_batch_.results.empty() || !phase_results_.empty();
     if (has_results) render_results();
     status_->setText(current_bam_path_.isEmpty()
-        ? QString("No current BAM selected; all BAMs are historical.%1").arg(has_results ? " Existing VAF evidence reused." : "")
+        ? QString("No current BAM selected; all BAMs are historical.%1").arg(has_results ? " Existing evidence reused." : "")
         : resource_label(current_bam_path_) + " designated as current."
-            + (has_results ? " Existing VAF evidence reused." : ""));
+            + (has_results ? " Existing evidence reused." : ""));
 }
 
 void MainWindow::clear_results() {
     last_batch_ = {};
     result_bam_paths_.clear();
     result_variant_origins_.clear();
+    phase_results_.clear();
+    phase_result_bam_paths_.clear();
     results_->setRowCount(0);
+    phasing_results_->setRowCount(0);
+    phasing_title_->setVisible(false);
+    phasing_results_->setVisible(false);
     summary_text_->clear();
     copy_summary_button_->setEnabled(false);
 }
@@ -1033,6 +1140,9 @@ FilterSettings MainWindow::filters() const {
     values.minimum_variant_allele_fraction = 0.0;
     values.minimum_alternate_reads = 1;
     values.minimum_alternate_molecules = 1;
+    values.minimum_phasing_support = std::max(1, minimum_phasing_support_->text().toInt());
+    values.maximum_phasing_conflict_fraction = std::clamp(
+        maximum_phasing_conflict_percent_->text().toDouble() / 100.0, 0.0, 1.0);
     values.molecule_mode = static_cast<MoleculeMode>(molecule_mode_->currentData().toInt());
     values.molecule_tag = molecule_tag_->text().trimmed().toUpper().toStdString();
     return values;
@@ -1044,8 +1154,10 @@ void MainWindow::run_queries() {
         QMessageBox::warning(this, "No prepared BAMs", "Add at least one BAM to the BAM panel first.");
         return;
     }
-    if (!minimum_mapq_->hasAcceptableInput() || !minimum_baseq_->hasAcceptableInput()) {
-        QMessageBox::warning(this, "Invalid quality filters", "MapQ and baseQ must be integers from 0 to 255.");
+    if (!minimum_mapq_->hasAcceptableInput() || !minimum_baseq_->hasAcceptableInput()
+        || !minimum_phasing_support_->hasAcceptableInput() || !maximum_phasing_conflict_percent_->hasAcceptableInput()) {
+        QMessageBox::warning(this, "Invalid evidence filters",
+            "MapQ and baseQ must be integers from 0 to 255, phase support must be at least 1, and maximum conflict must be from 0% to 100%.");
         return;
     }
     const auto selected_tag_mode = molecule_mode_->currentData().toInt() == static_cast<int>(MoleculeMode::selected_tag);
@@ -1080,6 +1192,35 @@ void MainWindow::run_queries() {
             ? "Enter at least one current or historical variant." : errors.front()));
         return;
     }
+    std::map<std::string, std::vector<VariantQuery>> variants_by_gene;
+    for (const auto& item : classified) {
+        if (!item.query.gene.empty()) variants_by_gene[normalized_gene(item.query.gene)].push_back(item.query);
+    }
+    std::vector<std::pair<VariantQuery, VariantQuery>> phasing_pairs;
+    constexpr std::size_t maximum_phasing_pairs = 10000;
+    bool phase_pair_limit_reached = false;
+    for (auto& [gene, variants] : variants_by_gene) {
+        (void)gene;
+        std::sort(variants.begin(), variants.end(), [](const auto& left, const auto& right) {
+            return std::tie(left.contig, left.position, left.reference, left.alternate)
+                < std::tie(right.contig, right.position, right.reference, right.alternate);
+        });
+        for (std::size_t first = 0; first < variants.size(); ++first) {
+            for (std::size_t second = first + 1; second < variants.size(); ++second) {
+                if (same_genomic_allele(variants[first], variants[second])) continue;
+                if (phasing_pairs.size() == maximum_phasing_pairs) {
+                    phase_pair_limit_reached = true;
+                    break;
+                }
+                phasing_pairs.emplace_back(variants[first], variants[second]);
+            }
+            if (phase_pair_limit_reached) break;
+        }
+        if (phase_pair_limit_reached) break;
+    }
+    if (phase_pair_limit_reached) {
+        errors.push_back("[Phasing] Pairwise phasing is limited to 10,000 variant pairs per run.");
+    }
     last_filters_ = filters();
     const auto bams = loaded_bam_paths_;
     const auto engines = loaded_engines_;
@@ -1091,9 +1232,10 @@ void MainWindow::run_queries() {
     loaded_bams_->setEnabled(false);
     current_query_text_->setEnabled(false);
     historical_query_text_->setEnabled(false);
-    status_->setText(QString("Calculating %1 distinct variant(s) across %2 prepared BAM(s)…")
-        .arg(classified.size()).arg(bams.size()));
+    status_->setText(QString("Calculating %1 variant(s) and %2 phase pair(s) across %3 prepared BAM(s)…")
+        .arg(classified.size()).arg(phasing_pairs.size()).arg(bams.size()));
     watcher_.setFuture(QtConcurrent::run([classified = std::move(classified), errors = std::move(errors),
+                                          phasing_pairs = std::move(phasing_pairs),
                                           filter_values = last_filters_, bams, engines,
                                           cache_snapshot = std::move(cache_snapshot)] {
         MultiBamBatch combined;
@@ -1136,6 +1278,23 @@ void MainWindow::run_queries() {
                         + sanitized_error(error.what(), bam));
                 }
             }
+            for (const auto& [first, second] : phasing_pairs) {
+                ++combined.phase_calculations;
+                try {
+                    combined.phase_results.push_back(engines[source_index]->phase_pair(first, second, filter_values));
+                } catch (const std::exception& error) {
+                    PhaseEvidence failed;
+                    failed.first = first;
+                    failed.second = second;
+                    failed.gene = first.gene.empty() ? second.gene : first.gene;
+                    failed.classification = PhaseClassification::indeterminate;
+                    failed.reason = sanitized_error(error.what(), bam);
+                    combined.phase_results.push_back(std::move(failed));
+                    combined.batch.errors.push_back("[" + resource_label(bam).toStdString() + "] [Phasing] "
+                        + sanitized_error(error.what(), bam));
+                }
+                combined.phase_result_bams.append(bam);
+            }
         }
         return combined;
     }));
@@ -1150,6 +1309,8 @@ void MainWindow::show_results() {
     last_batch_ = std::move(combined.batch);
     result_bam_paths_ = std::move(combined.result_bams);
     result_variant_origins_ = std::move(combined.result_variant_origins);
+    phase_results_ = std::move(combined.phase_results);
+    phase_result_bam_paths_ = std::move(combined.phase_result_bams);
     run_button_->setEnabled(true);
     load_bams_button_->setEnabled(true);
     loaded_bams_->setEnabled(true);
@@ -1157,8 +1318,9 @@ void MainWindow::show_results() {
     historical_query_text_->setEnabled(true);
     refresh_loaded_bams();
     render_results();
-    status_->setText(QString("%1 result(s) ready · %2 reused · %3 calculated · %4 issue(s)")
-        .arg(last_batch_.results.size()).arg(combined.cache_hits).arg(combined.calculations).arg(last_batch_.errors.size()));
+    status_->setText(QString("%1 VAF result(s) and %2 phase result(s) ready · %3 reused · %4 calculated · %5 issue(s)")
+        .arg(last_batch_.results.size()).arg(phase_results_.size()).arg(combined.cache_hits)
+        .arg(combined.calculations + combined.phase_calculations).arg(last_batch_.errors.size()));
     if (!queued_receiver_bams_.isEmpty()) {
         QTimer::singleShot(0, this, [this] { load_queued_receiver_bams(); });
     }
@@ -1221,11 +1383,71 @@ void MainWindow::render_results() {
         }
         narrative_evidence.push_back({resource_label(bam_path).toStdString(), current_bam, origin, *evidence});
     }
+
+    phasing_results_->setRowCount(0);
+    std::vector<std::size_t> phase_order(phase_results_.size());
+    for (std::size_t index = 0; index < phase_order.size(); ++index) phase_order[index] = index;
+    std::sort(phase_order.begin(), phase_order.end(), [this](const std::size_t left, const std::size_t right) {
+        const auto& left_path = phase_result_bam_paths_[static_cast<qsizetype>(left)];
+        const auto& right_path = phase_result_bam_paths_[static_cast<qsizetype>(right)];
+        const bool left_current = !current_bam_path_.isEmpty() && left_path == current_bam_path_;
+        const bool right_current = !current_bam_path_.isEmpty() && right_path == current_bam_path_;
+        if (left_current != right_current) return left_current;
+        const auto left_bam = resource_label(left_path).toCaseFolded();
+        const auto right_bam = resource_label(right_path).toCaseFolded();
+        if (left_bam != right_bam) return left_bam < right_bam;
+        const auto& left_phase = phase_results_[left];
+        const auto& right_phase = phase_results_[right];
+        return std::tie(left_phase.gene, left_phase.first.position, left_phase.second.position)
+            < std::tie(right_phase.gene, right_phase.first.position, right_phase.second.position);
+    });
+    std::vector<ComparativePhaseEvidence> narrative_phasing;
+    narrative_phasing.reserve(phase_results_.size());
+    for (const auto source_row : phase_order) {
+        const auto& phase = phase_results_[source_row];
+        const auto& bam_path = phase_result_bam_paths_[static_cast<qsizetype>(source_row)];
+        const bool current_bam = !current_bam_path_.isEmpty() && bam_path == current_bam_path_;
+        const int row = phasing_results_->rowCount();
+        phasing_results_->insertRow(row);
+        const auto distance = phase.genomic_distance < 0
+            ? QString("N/A") : QString::number(phase.genomic_distance) + " bp";
+        const auto pair = display_query(phase.first) + "  ↔  " + display_query(phase.second);
+        const QList<QString> values{current_bam ? "Current" : "Historical",
+            compact_resource_label(bam_path, phasing_results_->font()), QString::fromStdString(phase.gene), pair,
+            distance, display_phase_name(phase.classification), QString::number(phase.counts.informative_molecules()),
+            QString::number(phase.counts.alternate_alternate), QString::number(phase.counts.alternate_reference),
+            QString::number(phase.counts.reference_alternate), QString::number(phase.counts.reference_reference)};
+        const auto diagnostic = QString("%1\nDirect physical linkage: %2\nMolecule grouping: %3\n"
+                                        "Discordant: %4 (%5%)\nNon-informative molecules: %6\nReads missing selected tag: %7")
+            .arg(QString::fromStdString(phase.reason))
+            .arg(phase.direct_phasing_possible ? "yes" : "no")
+            .arg(QString::fromStdString(phase.molecule_tag_used))
+            .arg(phase.discordant_molecules)
+            .arg(phase.discordant_fraction * 100.0, 0, 'f', 1)
+            .arg(phase.counts.noninformative_molecules)
+            .arg(phase.reads_missing_molecule_tag);
+        for (int column = 0; column < values.size(); ++column) {
+            auto* item = new QTableWidgetItem(values[column]);
+            item->setTextAlignment(column >= 4 ? Qt::AlignCenter : Qt::AlignVCenter | Qt::AlignLeft);
+            if (column == 0) item->setData(Qt::UserRole, current_bam);
+            if (column == 1) item->setToolTip(sanitized_resource_uri(bam_path));
+            if (column >= 3) item->setToolTip(diagnostic);
+            phasing_results_->setItem(row, column, item);
+        }
+        narrative_phasing.push_back({resource_label(bam_path).toStdString(), current_bam, phase});
+    }
+    const bool has_phasing = !phase_results_.empty();
+    phasing_title_->setVisible(has_phasing);
+    phasing_results_->setVisible(has_phasing);
     apply_theme();
     QString issue_text;
     for (const auto& error : last_batch_.errors) issue_text += QString::fromStdString(error) + '\n';
     status_->setToolTip(issue_text.trimmed());
-    const auto narrative = QString::fromStdString(comparison_narrative(narrative_evidence)).trimmed();
+    const auto comparison = QString::fromStdString(comparison_narrative(narrative_evidence)).trimmed();
+    const auto phasing = QString::fromStdString(phasing_narrative(narrative_phasing)).trimmed();
+    QString narrative = comparison;
+    if (!narrative.isEmpty() && !phasing.isEmpty()) narrative += "\n\n";
+    narrative += phasing;
     summary_text_->setPlainText(narrative.isEmpty()
         ? "No comparison-specific narrative was generated. Variants listed in both sets are excluded, and historical-only variants require a current BAM."
         : narrative);

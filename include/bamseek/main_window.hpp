@@ -64,6 +64,8 @@ private:
     QLabel* bam_count_{};
     QLineEdit* minimum_mapq_{};
     QLineEdit* minimum_baseq_{};
+    QLineEdit* minimum_phasing_support_{};
+    QLineEdit* maximum_phasing_conflict_percent_{};
     QCheckBox* include_duplicates_{};
     QCheckBox* include_secondary_{};
     QCheckBox* include_supplementary_{};
@@ -73,6 +75,8 @@ private:
     QPlainTextEdit* historical_query_text_{};
     QPlainTextEdit* summary_text_{};
     QTableWidget* results_{};
+    QLabel* phasing_title_{};
+    QTableWidget* phasing_results_{};
     QTabWidget* tabs_{};
     QLabel* status_{};
     QPushButton* run_button_{};
@@ -99,6 +103,8 @@ private:
     std::vector<std::shared_ptr<EvidenceEngine>> loaded_engines_;
     QStringList result_bam_paths_;
     std::vector<VariantOrigin> result_variant_origins_;
+    std::vector<PhaseEvidence> phase_results_;
+    QStringList phase_result_bam_paths_;
     std::unordered_map<std::string, std::unordered_map<std::string, VariantEvidence>> evidence_cache_;
     bool clear_bam_input_after_load_ = false;
     bool refreshing_bam_list_ = false;
@@ -115,9 +121,12 @@ private:
         BatchEvidence batch;
         QStringList result_bams;
         std::vector<VariantOrigin> result_variant_origins;
+        std::vector<PhaseEvidence> phase_results;
+        QStringList phase_result_bams;
         std::unordered_map<std::string, std::unordered_map<std::string, VariantEvidence>> cache_updates;
         std::size_t cache_hits{};
         std::size_t calculations{};
+        std::size_t phase_calculations{};
     };
     QFutureWatcher<MultiBamBatch> watcher_;
 };
