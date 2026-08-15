@@ -2,3 +2,4 @@
 /build-*/
 .DS_Store
 /tests/data
+/logo-variants

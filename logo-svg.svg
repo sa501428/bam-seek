@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600">
+  <defs>
+    <!-- Define the clip path and color for reuse (though not strictly necessary) -->
+  </defs>
+
+  <!-- Clean white background -->
+  <rect width="100%" height="100%" fill="white" />
+
+  <!-- A group to hold all the bars for better structure -->
+  <g id="bars" transform="translate(0, 50)">
+    <!-- Iterate through the 12 bars, with top four segmented by color -->
+
+    <!-- Bar 1 (Top) - Segmented Gray-Orange-Gray -->
+    <!-- Gray Left Piece with rounded left corners -->
+    <path d="M 50 12.5 A 12.5 12.5 0 0 1 62.5 0 L 350 0 L 350 25 L 62.5 25 A 12.5 12.5 0 0 1 50 12.5 Z" fill="#808B96" />
+    <!-- Orange Center Piece with sharp vertical edges -->
+    <rect x="350" y="0" width="80" height="25" fill="#F5B041" />
+    <!-- Gray Right Piece with rounded right corners -->
+    <path d="M 430 0 L 587.5 0 A 12.5 12.5 0 0 1 600 12.5 A 12.5 12.5 0 0 1 587.5 25 L 430 25 Z" fill="#808B96" />
+
+    <!-- Bar 2 - Segmented Gray-Orange-Gray -->
+    <path d="M 100 42.5 A 12.5 12.5 0 0 1 112.5 30 L 350 30 L 350 55 L 112.5 55 A 12.5 12.5 0 0 1 100 42.5 Z" fill="#808B96" />
+    <rect x="350" y="30" width="80" height="25" fill="#F5B041" />
+    <path d="M 430 30 L 567.5 30 A 12.5 12.5 0 0 1 580 42.5 A 12.5 12.5 0 0 1 567.5 55 L 430 55 Z" fill="#808B96" />
+
+    <!-- Bar 3 - Segmented Gray-Orange-Gray -->
+    <path d="M 150 72.5 A 12.5 12.5 0 0 1 162.5 60 L 350 60 L 350 85 L 162.5 85 A 12.5 12.5 0 0 1 150 72.5 Z" fill="#808B96" />
+    <rect x="350" y="60" width="80" height="25" fill="#F5B041" />
+    <path d="M 430 60 L 547.5 60 A 12.5 12.5 0 0 1 560 72.5 A 12.5 12.5 0 0 1 547.5 85 L 430 85 Z" fill="#808B96" />
+
+    <!-- Bar 4 - Segmented Gray-Orange-Gray -->
+    <path d="M 180 102.5 A 12.5 12.5 0 0 1 192.5 90 L 350 90 L 350 115 L 192.5 115 A 12.5 12.5 0 0 1 180 102.5 Z" fill="#808B96" />
+    <rect x="350" y="90" width="80" height="25" fill="#F5B041" />
+    <path d="M 430 90 L 527.5 90 A 12.5 12.5 0 0 1 540 102.5 A 12.5 12.5 0 0 1 527.5 115 L 430 115 Z" fill="#808B96" />
+
+    <!-- Remaining 8 bars are solid gray with rounded corners -->
+
+    <!-- Bar 5 -->
+    <rect x="50" y="120" width="550" height="25" rx="12.5" ry="12.5" fill="#808B96" />
+
+    <!-- Bar 6 -->
+    <rect x="100" y="150" width="480" height="25" rx="12.5" ry="12.5" fill="#808B96" />
+
+    <!-- Bar 7 -->
+    <rect x="150" y="180" width="410" height="25" rx="12.5" ry="12.5" fill="#808B96" />
+
+    <!-- Bar 8 -->
+    <rect x="180" y="210" width="360" height="25" rx="12.5" ry="12.5" fill="#808B96" />
+
+    <!-- Bar 9 -->
+    <rect x="220" y="240" width="310" height="25" rx="12.5" ry="12.5" fill="#808B96" />
+
+    <!-- Bar 10 -->
+    <rect x="260" y="270" width="260" height="25" rx="12.5" ry="12.5" fill="#808B96" />
+
+    <!-- Bar 11 -->
+    <rect x="300" y="300" width="210" height="25" rx="12.5" ry="12.5" fill="#808B96" />
+
+    <!-- Bar 12 (Bottom) -->
+    <rect x="340" y="330" width="160" height="25" rx="12.5" ry="12.5" fill="#808B96" />
+
+  </g>
+</svg>

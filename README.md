@@ -67,14 +67,20 @@ brew install cmake htslib pkg-config qt
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$(brew --prefix qt)"
 cmake --build build -j
 ctest --test-dir build --output-on-failure
-open build/bam-seek.app
+open "build/BAM Seek.app"
 ```
 
-For a distributable app bundle, Qt's deployment helper copies the Qt frameworks into the generated bundle:
+Build a self-contained DMG (including Qt and Homebrew runtime libraries) with:
 
 ```sh
-"$(brew --prefix qt)/bin/macdeployqt" build/bam-seek.app
+./scripts/package-macos.sh
 ```
+
+The DMG and its SHA-256 checksum are written to `build-package-macos/packages`.
+Set `QT_ROOT`, `IGVCPP_SOURCE_DIR`, or `BAM_SEEK_BUILD_DIRECTORY` to override
+the script defaults. The bundle is ad-hoc signed after its libraries are fixed
+up so it can run locally. Distribution outside a local or managed environment
+still requires Apple Developer ID signing and notarization.
 
 ### Windows
 
@@ -89,6 +95,44 @@ cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-The executable will be under `build/Release`. Run `windeployqt` from the matching Qt installation before packaging it in an installer.
+The executable will be under `build/Release`. To produce a self-contained NSIS
+`.exe` installer, a WiX `.msi`, or both, install the packaging tool(s):
+
+```powershell
+choco install nsis
+dotnet tool install --global wix --version 4.0.4
+wix extension add --global WixToolset.UI.wixext/4.0.4
+```
+
+Then run one of:
+
+```powershell
+./scripts/package-windows.ps1                         # both .exe and .msi
+./scripts/package-windows.ps1 -InstallerFormat NSIS  # .exe only
+./scripts/package-windows.ps1 -InstallerFormat WIX   # .msi only
+```
+
+Set `QT_ROOT` to the Qt MSVC directory (for example,
+`C:/Qt/6.8.3/msvc2022_64`) and `VCPKG_ROOT` to the vcpkg checkout first. The
+installer(s) and SHA-256 checksums are written to
+`build-package-windows/packages`. The install step collects HTSlib and its
+vcpkg runtime DLLs, while Qt's deployment helper adds the required Qt DLLs,
+platform plugin, image handlers, and TLS backends. CMake 3.30 or newer is
+required for the scripted WiX 4 build; CMake 3.24–3.29 can instead use an
+installed WiX 3 toolset. The generated Windows installers are not Authenticode
+signed, so public distribution may trigger a Microsoft Defender SmartScreen
+warning until a trusted signing certificate is added.
+
+The same packages can be generated without the helper scripts after configuring
+and building:
+
+```sh
+cpack --config build/CPackConfig.cmake -C Release -G DragNDrop  # macOS
+```
+
+```powershell
+cpack --config build/CPackConfig.cmake -C Release -G NSIS  # Windows .exe
+cpack --config build/CPackConfig.cmake -C Release -G WIX   # Windows .msi
+```
 
 If `igv-cpp` is elsewhere, pass `-DIGVCPP_SOURCE_DIR=/path/to/igv-cpp`. For local memory-safety testing, configure with `-DBAM_SEEK_ENABLE_SANITIZERS=ON` on Clang or GCC.

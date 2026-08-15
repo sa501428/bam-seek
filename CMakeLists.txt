@@ -6,6 +6,7 @@ include(CTest)
 
 option(BAM_SEEK_BUILD_GUI "Build the Qt desktop application" ON)
 option(BAM_SEEK_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+option(BAM_SEEK_ENABLE_PACKAGING "Generate install rules and native desktop packages" ON)
 set(IGVCPP_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../igv-cpp" CACHE PATH
     "Path to the igv-cpp source checkout")
 
@@ -14,7 +15,10 @@ if(NOT TARGET igv::igv)
         message(FATAL_ERROR "igv-cpp was not found. Set IGVCPP_SOURCE_DIR to its source directory.")
     endif()
     set(IGVCPP_BUILD_TESTS OFF CACHE BOOL "Build igv-cpp tests" FORCE)
-    add_subdirectory("${IGVCPP_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/igv-cpp")
+    # BAM Seek links igv-cpp statically into the application. Excluding its
+    # directory from the parent install keeps igv-cpp's SDK headers and CMake
+    # package metadata out of the desktop installer.
+    add_subdirectory("${IGVCPP_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/igv-cpp" EXCLUDE_FROM_ALL)
 endif()
 
 add_library(bam_seek_core
@@ -46,7 +50,26 @@ if(BAM_SEEK_BUILD_GUI)
     )
     target_link_libraries(bam-seek PRIVATE bamseek::core Qt6::Concurrent Qt6::Network Qt6::Widgets)
     target_compile_definitions(bam-seek PRIVATE BAM_SEEK_VERSION="${PROJECT_VERSION}")
-    set_target_properties(bam-seek PROPERTIES MACOSX_BUNDLE TRUE WIN32_EXECUTABLE TRUE)
+    set_target_properties(bam-seek PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_BUNDLE_NAME "BAM Seek"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "org.bamseek.app"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+        WIN32_EXECUTABLE TRUE
+    )
+    if(APPLE)
+        set_target_properties(bam-seek PROPERTIES OUTPUT_NAME "BAM Seek")
+    endif()
+
+    if(WIN32)
+        configure_file(
+            packaging/windows/bam-seek.rc.in
+            "${CMAKE_CURRENT_BINARY_DIR}/bam-seek.rc"
+            @ONLY
+        )
+        target_sources(bam-seek PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/bam-seek.rc")
+    endif()
 
     if(BUILD_TESTING)
         add_executable(bam_seek_receiver_tests
@@ -68,6 +91,10 @@ if(BAM_SEEK_BUILD_GUI)
         target_link_libraries(bam_seek_pileup_tests PRIVATE bamseek::core Qt6::Widgets)
         add_test(NAME bam_seek_pileup_tests COMMAND bam_seek_pileup_tests)
         set_tests_properties(bam_seek_pileup_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    endif()
+
+    if(BAM_SEEK_ENABLE_PACKAGING)
+        include(cmake/Packaging.cmake)
     endif()
 endif()
 
